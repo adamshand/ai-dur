@@ -8,6 +8,7 @@ The POC provides an executable shell command:
 
 ```fish
 dur [--debug] [--include-clipboard] <question>
+dur [--debug] chat
 dur config include-clipboard always
 dur config include-clipboard ask
 dur config include-clipboard never
@@ -28,7 +29,7 @@ dur status
 
 `dur models` lists GPT 5+ non-Pro models that use the `/v1/responses` endpoint. `dur config model <model>` stores a persistent model. `dur status` displays the effective model, include-clipboard setting, and streaming setting.
 
-No assistant-driven shell command execution, no tool use, no automatic terminal output capture, and no package-manager dependencies.
+Plain `dur <question>` remains stateless and has no assistant-driven command execution. `dur chat` starts an ephemeral in-memory REPL with read-only diagnostic tools that run without a shell. No automatic terminal output capture and no package-manager dependencies.
 
 ---
 
@@ -43,6 +44,7 @@ This POC will not support:
 - guaranteeing clipboard reads through terminal multiplexers unless they pass OSC 52 through correctly
 - `dur run`
 - shell command execution by the assistant
+- mutating tool commands
 - file editing
 - OpenAI OAuth
 - TUI interface
@@ -170,6 +172,7 @@ Prints usage to stderr:
 
 ```text
 Usage: dur [--debug] [--include-clipboard] <question>
+       dur chat
        dur config include-clipboard always|ask|never
        dur config streaming on|off
        dur config model <model>
@@ -500,6 +503,7 @@ Exit code: `2`
 
 ```text
 Usage: dur [--debug] [--include-clipboard] <question>
+       dur chat
        dur config include-clipboard always|ask|never
        dur config streaming on|off
        dur config model <model>
@@ -636,6 +640,40 @@ dur: could not parse response
 ```
 
 ---
+
+## Ephemeral chat with read-only tools
+
+`dur chat` starts a REPL. Conversation and tool results are kept only in memory and are discarded when the process exits. Chat tools are always enabled.
+
+Slash commands:
+
+```text
+/help        show chat help
+/pwd         show the current tool working directory
+/cd <path>   change the current tool working directory
+/tools       list allowed tools and limits
+/exit        quit
+/quit        quit
+```
+
+The assistant has one function tool, `run_readonly_command`, with `{cmd, args}`. Aidur must run commands with `shell=False`, no stdin, a trusted binary path, a timeout, output caps, secret redaction, and command-specific validators.
+
+Allowed commands include:
+
+```text
+pwd ls stat file wc head tail cat rg grep
+df free uptime uname id whoami hostname ps ss ip
+dig whois ping dmesg journalctl systemctl docker find
+```
+
+`find` is an internal safe subset supporting paths under the chat cwd plus `-name`, `-iname`, `-path`, `-ipath`, `-type f|d|l`, `-maxdepth`, `-mindepth`, and `-print`. It must deny `-exec`, `-execdir`, `-ok`, `-okdir`, `-delete`, `-fprint`, `-fls`, `-fprintf`, and `-printf`.
+
+Tool limits are configurable through:
+
+```text
+AIDUR_TOOL_TIMEOUT_SECONDS = 10
+AIDUR_TOOL_MAX_BYTES       = 65536
+```
 
 ## Implementation constraints
 

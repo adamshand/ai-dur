@@ -7,6 +7,7 @@ import pathlib
 import tempfile
 import unittest
 from unittest import mock
+from types import SimpleNamespace
 from urllib.error import HTTPError
 
 SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "dur"
@@ -579,6 +580,57 @@ class AidurTests(unittest.TestCase):
         written = "".join(call.args[0] for call in stderr.write.call_args_list if call.args)
         self.assertNotIn("secret-key", written)
         self.assertIn("[REDACTED]", written)
+
+    def test_chat_command_enters_ephemeral_chat(self):
+        with mock.patch.object(aidur, "run_chat", return_value=0) as run_chat:
+            self.assertEqual(aidur.main(["chat"]), 0)
+        run_chat.assert_called_once_with(debug=False)
+
+    def test_readonly_tool_rejects_shell_redirection(self):
+        result = aidur.run_readonly_command("cat", [">", "out.txt"], os.getcwd())
+        self.assertIn("denied", result)
+        self.assertIn("shell syntax", result)
+
+    def test_docker_logs_injects_tail_and_denies_follow(self):
+        completed = SimpleNamespace(returncode=0, stdout=b"ok", stderr=b"")
+        with mock.patch.object(aidur, "resolve_tool_binary", return_value="/usr/bin/docker"), \
+             mock.patch.object(aidur.subprocess, "run", return_value=completed) as run:
+            result = aidur.run_readonly_command("docker", ["logs", "web"], os.getcwd())
+        self.assertIn("exit_code: 0", result)
+        self.assertEqual(run.call_args.args[0], ["/usr/bin/docker", "logs", "--tail", "200", "web"])
+        denied = aidur.run_readonly_command("docker", ["logs", "-f", "web"], os.getcwd())
+        self.assertIn("follow mode is not allowed", denied)
+        unbounded = aidur.run_readonly_command("docker", ["logs", "--tail", "all", "web"], os.getcwd())
+        self.assertIn("docker logs tail must be a number", unbounded)
+
+    def test_ping_injects_bounds_and_denies_flood(self):
+        completed = SimpleNamespace(returncode=0, stdout=b"ok", stderr=b"")
+        with mock.patch.object(aidur, "resolve_tool_binary", return_value="/bin/ping"), \
+             mock.patch.object(aidur.subprocess, "run", return_value=completed) as run:
+            aidur.run_readonly_command("ping", ["example.com"], os.getcwd())
+        argv = run.call_args.args[0]
+        self.assertIn("-c", argv)
+        self.assertIn("4", argv)
+        self.assertIn("-w", argv)
+        self.assertIn("8", argv)
+        denied = aidur.run_readonly_command("ping", ["-f", "example.com"], os.getcwd())
+        self.assertIn("flood mode is not allowed", denied)
+        too_many = aidur.run_readonly_command("ping", ["-c", "999", "example.com"], os.getcwd())
+        self.assertIn("ping count must be no greater than 10", too_many)
+
+    def test_safe_find_denies_mutating_actions_and_finds_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pathlib.Path(tmpdir, "app.py").write_text("print('hi')\n")
+            result = aidur.run_readonly_command("find", [".", "-name", "*.py", "-type", "f"], tmpdir)
+            denied = aidur.run_readonly_command("find", [".", "-delete"], tmpdir)
+        self.assertIn("app.py", result)
+        self.assertIn("find action not allowed", denied)
+
+    def test_readonly_tool_rejects_mutating_ip_dmesg_and_hostname(self):
+        self.assertIn("mutating ip", aidur.run_readonly_command("ip", ["link", "set", "eth0", "down"], os.getcwd()))
+        self.assertIn("dmesg option not allowed", aidur.run_readonly_command("dmesg", ["--clear"], os.getcwd()))
+        self.assertIn("hostname arguments are not allowed", aidur.run_readonly_command("hostname", ["new-host"], os.getcwd()))
+        self.assertIn("journalctl line count", aidur.run_readonly_command("journalctl", ["-n", "all"], os.getcwd()))
 
 
 if __name__ == "__main__":

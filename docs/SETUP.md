@@ -1,6 +1,6 @@
 # Aidur setup
 
-Aidur is a minimal shell `dur` command. It sends your question to an OpenAI-compatible opencode endpoint and prints the answer in your terminal. It supports explicit clipboard context, optional persistent clipboard inclusion through OSC 52, and piped stdin context.
+Aidur is a minimal shell `dur` command. It sends your question to an OpenAI-compatible opencode endpoint and prints the answer in your terminal. It supports explicit clipboard context, optional persistent clipboard inclusion through OSC 52, piped stdin context, and ephemeral `dur chat` sessions with read-only diagnostic tools.
 
 ## Requirements
 
@@ -76,13 +76,15 @@ For an exact endpoint override, set `OPENCODE_ENDPOINT`:
 export OPENCODE_ENDPOINT="https://example.com/v1/responses"
 ```
 
-Optionally configure the request timeout in seconds, OSC 52 clipboard-read timeout in seconds, the maximum clipboard/stdin context bytes, and the config file path. `AIDUR_MODEL` still works as an environment override, but `dur config model` is preferred for persistent model selection.
+Optionally configure the request timeout in seconds, OSC 52 clipboard-read timeout in seconds, the maximum clipboard/stdin context bytes, read-only chat tool limits, and the config file path. `AIDUR_MODEL` still works as an environment override, but `dur config model` is preferred for persistent model selection.
 
 ```sh
 export AIDUR_MODEL="gpt-5.5"
 export AIDUR_TIMEOUT_SECONDS="60"
 export AIDUR_CLIPBOARD_TIMEOUT_SECONDS="15"
 export AIDUR_CLIP_MAX_BYTES="65536"
+export AIDUR_TOOL_TIMEOUT_SECONDS="10"
+export AIDUR_TOOL_MAX_BYTES="65536"
 export AIDUR_CONFIG="$HOME/.config/aidur/config.json"
 ```
 
@@ -100,6 +102,14 @@ Ask a question:
 ```fish
 dur what does chmod 755 mean?
 ```
+
+Start an ephemeral troubleshooting chat with read-only tools enabled:
+
+```fish
+dur chat
+```
+
+Chat state is kept in memory only. Use `/help`, `/tools`, `/pwd`, `/cd <path>`, `/exit`, and `/quit` inside the chat. Tools run without a shell, with allowlisted commands, validators, time/output caps, and secret redaction.
 
 Print the exact request body sent to the agent, including system prompt and user/context payload, to stderr:
 
@@ -272,4 +282,4 @@ unset AIDUR_CONFIG
 
 ## Privacy and safety
 
-For plain `dur <question>`, Aidur only sends the question you type unless persistent clipboard inclusion is enabled and the terminal permits a new clipboard read. For explicit `dur --include-clipboard [question]`, Aidur sends your question plus the current clipboard text. For piped stdin, Aidur sends your question plus stdin context. `--debug` prints the request body to stderr for inspection and may expose clipboard/stdin content locally. Streaming changes how the response is printed, not what context is sent. It does not read shell history, automatically capture previous command output, read files, execute assistant-requested commands, or keep persistent chat history.
+For plain `dur <question>`, Aidur only sends the question you type unless persistent clipboard inclusion is enabled and the terminal permits a new clipboard read. For explicit `dur --include-clipboard [question]`, Aidur sends your question plus the current clipboard text. For piped stdin, Aidur sends your question plus stdin context. `dur chat` can read local/system information through its read-only tools and sends tool output to the API as part of the ephemeral conversation. `--debug` prints the request body to stderr for inspection and may expose clipboard/stdin/tool content locally. Streaming changes how the response is printed, not what context is sent. Aidur does not read shell history, automatically capture previous command output, make file changes, run a shell for the assistant, or keep persistent chat history.
