@@ -16,6 +16,9 @@ import urllib.error
 import urllib.request
 
 
+COMMAND_NAME = "dur"
+USER_AGENT = f"{COMMAND_NAME}/0.1"
+
 DEFAULT_ENDPOINT = "https://opencode.ai/zen/v1/responses"
 DEFAULT_MODEL = "gpt-5.4-mini"
 DEFAULT_TIMEOUT_SECONDS = 60
@@ -26,6 +29,19 @@ AUTO_CLIP_MODES = {"off", "ask", "on"}
 CLIPBOARD_MODE_LABELS = {"off": "never", "ask": "ask", "on": "always"}
 CLIPBOARD_MODE_VALUES = {"never": "off", "ask": "ask", "always": "on"}
 STREAMING_MODES = {"off", "on"}
+USAGE_TEXT = (
+    f"Usage: {COMMAND_NAME} [--debug] [--include-clipboard] <question>\n"
+    f"       {COMMAND_NAME} config include-clipboard always|ask|never\n"
+    f"       {COMMAND_NAME} config streaming on|off\n"
+    f"       {COMMAND_NAME} config model <model>\n"
+    f"       {COMMAND_NAME} models\n"
+    f"       {COMMAND_NAME} status"
+)
+CONFIG_USAGE_TEXT = (
+    f"Usage: {COMMAND_NAME} config include-clipboard always|ask|never\n"
+    f"       {COMMAND_NAME} config streaming on|off\n"
+    f"       {COMMAND_NAME} config model <model>"
+)
 ZEN_MODELS_ENDPOINT = "https://opencode.ai/zen/v1/models"
 RESPONSE_MODELS = [
     {"id": "gpt-5.5", "name": "GPT 5.5"},
@@ -66,14 +82,7 @@ def eprint(message):
 
 
 def usage():
-    eprint(
-        "Usage: dur [--debug] [--include-clipboard] <question>\n"
-        "       dur config include-clipboard always|ask|never\n"
-        "       dur config streaming on|off\n"
-        "       dur config model <model>\n"
-        "       dur models\n"
-        "       dur status"
-    )
+    eprint(USAGE_TEXT)
     return 2
 
 
@@ -236,7 +245,9 @@ def response_endpoint_url():
     if endpoint:
         return endpoint
     base_url = os.environ.get("OPENCODE_BASE_URL")
-    return base_url.rstrip("/") + "/v1/responses" if base_url else DEFAULT_ENDPOINT
+    if base_url:
+        return base_url.rstrip("/") + "/v1/responses"
+    return DEFAULT_ENDPOINT
 
 
 def model_metadata_values(model, keys):
@@ -308,7 +319,7 @@ def fetch_models(api_key, timeout):
         headers={
             "Authorization": f"Bearer {api_key}",
             "Accept": "application/json",
-            "User-Agent": "dur/0.1",
+            "User-Agent": USER_AGENT,
         },
         method="GET",
     )
@@ -354,11 +365,7 @@ def set_model(model_id):
 
 
 def config_help():
-    eprint(
-        "Usage: dur config include-clipboard always|ask|never\n"
-        "       dur config streaming on|off\n"
-        "       dur config model <model>"
-    )
+    eprint(CONFIG_USAGE_TEXT)
     return 2
 
 
@@ -708,7 +715,7 @@ def build_request(url, api_key, model, question, stream=False):
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "User-Agent": "dur/0.1",
+            "User-Agent": USER_AGENT,
         },
         method="POST",
     )
@@ -840,9 +847,8 @@ def main(argv):
         if config_code is not None:
             return config_code
 
-    use_clipboard = include_clipboard
     question = " ".join(argv)
-    if use_clipboard and not question:
+    if include_clipboard and not question:
         question = "Explain this clipboard content and suggest practical next steps."
 
     api_key = require_env(
@@ -855,13 +861,10 @@ def main(argv):
     timeout = get_timeout()
     max_bytes = get_clip_max_bytes()
 
-    if use_clipboard:
+    if include_clipboard:
         try:
             clipboard_text, truncated, _ = read_clipboard(max_bytes)
-        except ClipboardUnavailable as exc:
-            eprint(f"dur: clipboard unavailable: {exc}")
-            return 1
-        except InputUnavailable as exc:
+        except (ClipboardUnavailable, InputUnavailable) as exc:
             eprint(f"dur: clipboard unavailable: {exc}")
             return 1
         if clipboard_text == "":
