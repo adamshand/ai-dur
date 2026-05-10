@@ -1,4 +1,5 @@
 import importlib.util
+import importlib.machinery
 import io
 import json
 import os
@@ -8,10 +9,11 @@ import unittest
 from unittest import mock
 from urllib.error import HTTPError
 
-SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "bin" / "aidur.py"
-spec = importlib.util.spec_from_file_location("aidur", SCRIPT)
+SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "dur"
+loader = importlib.machinery.SourceFileLoader("aidur", str(SCRIPT))
+spec = importlib.util.spec_from_loader("aidur", loader)
 aidur = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(aidur)
+loader.exec_module(aidur)
 
 
 class FakeResponse:
@@ -74,6 +76,7 @@ class AidurTests(unittest.TestCase):
         payload = json.loads(request.data.decode())
         self.assertEqual(payload["model"], "model")
         self.assertEqual(payload["input"], "hello")
+        self.assertTrue(payload["stream"])
         stdout.write.assert_any_call("ok")
 
     def test_uses_default_model_when_aidur_model_is_unset(self):
@@ -118,7 +121,7 @@ class AidurTests(unittest.TestCase):
         self.assertEqual(code, 0)
         request = urlopen.call_args.args[0]
         self.assertEqual(request.get_header("Accept"), "application/json")
-        self.assertEqual(request.get_header("User-agent"), "aidur/0.1")
+        self.assertEqual(request.get_header("User-agent"), "dur/0.1")
 
     def test_endpoint_override_uses_exact_url(self):
         code, urlopen, _, _ = self.run_main(
@@ -136,12 +139,12 @@ class AidurTests(unittest.TestCase):
         with mock.patch("sys.stderr") as stderr:
             self.assertEqual(aidur.main([]), 2)
         written = "".join(call.args[0] for call in stderr.write.call_args_list if call.args)
-        self.assertIn("Usage: ai <question>", written)
-        self.assertIn("ai clip [question]", written)
-        self.assertIn("ai auto-clip on|ask|off", written)
-        self.assertIn("ai models list", written)
-        self.assertIn("ai models set <model>", written)
-        self.assertIn("ai status", written)
+        self.assertIn("Usage: dur [--debug] [--include-clipboard] <question>", written)
+        self.assertIn("dur config include-clipboard always|ask|never", written)
+        self.assertIn("dur config streaming on|off", written)
+        self.assertIn("dur config model <model>", written)
+        self.assertIn("dur models", written)
+        self.assertIn("dur status", written)
 
     def test_help_commands_print_usage_without_api_call(self):
         for argv in (["help"], ["--help"], ["-h"]):
@@ -151,13 +154,13 @@ class AidurTests(unittest.TestCase):
                 self.assertEqual(aidur.main(list(argv)), 2)
             urlopen.assert_not_called()
             written = "".join(call.args[0] for call in stderr.write.call_args_list if call.args)
-            self.assertIn("Usage: ai <question>", written)
+            self.assertIn("Usage: dur [--debug] [--include-clipboard] <question>", written)
 
     def test_clip_uses_osc52_context(self):
         env = {"OPENCODE_ZEN_API_KEY": "key", "AIDUR_MODEL": "model"}
         with mock.patch.object(aidur, "read_clipboard", return_value=("pytest failed\n", False, "md5")) as read_clipboard:
             code, urlopen, _, _ = self.run_main(
-                ["clip", "why", "did", "this", "fail?"],
+                ["--include-clipboard", "why", "did", "this", "fail?"],
                 env,
             )
 
@@ -173,7 +176,7 @@ class AidurTests(unittest.TestCase):
     def test_clip_uses_default_question(self):
         env = {"OPENCODE_ZEN_API_KEY": "key", "AIDUR_MODEL": "model"}
         with mock.patch.object(aidur, "read_clipboard", return_value=("some log\n", False, "md5")):
-            code, urlopen, _, _ = self.run_main(["clip"], env)
+            code, urlopen, _, _ = self.run_main(["--include-clipboard"], env)
 
         self.assertEqual(code, 0)
         request = urlopen.call_args.args[0]
@@ -189,12 +192,12 @@ class AidurTests(unittest.TestCase):
              mock.patch("sys.stdin", TtyStdin()), \
              mock.patch("urllib.request.urlopen") as urlopen, \
              mock.patch("sys.stderr") as stderr:
-            code = aidur.main(["clip", "what", "is", "this?"])
+            code = aidur.main(["--include-clipboard", "what", "is", "this?"])
 
         self.assertEqual(code, 2)
         urlopen.assert_not_called()
         written = "".join(call.args[0] for call in stderr.write.call_args_list if call.args)
-        self.assertIn("ai: clipboard is empty", written)
+        self.assertIn("dur: clipboard is empty", written)
 
     def test_clip_reports_osc52_unavailable(self):
         env = {"OPENCODE_ZEN_API_KEY": "key", "AIDUR_MODEL": "model"}
@@ -204,12 +207,12 @@ class AidurTests(unittest.TestCase):
              mock.patch("sys.stdin", TtyStdin()), \
              mock.patch("urllib.request.urlopen") as urlopen, \
              mock.patch("sys.stderr") as stderr:
-            code = aidur.main(["clip", "why?"])
+            code = aidur.main(["--include-clipboard", "why?"])
 
         self.assertEqual(code, 1)
         urlopen.assert_not_called()
         written = "".join(call.args[0] for call in stderr.write.call_args_list if call.args)
-        self.assertIn("ai: clipboard unavailable: OSC 52 query timed out", written)
+        self.assertIn("dur: clipboard unavailable: OSC 52 query timed out", written)
 
     def test_extract_osc52_payload_supports_st_and_bel(self):
         self.assertEqual(
@@ -226,20 +229,89 @@ class AidurTests(unittest.TestCase):
         self.assertTrue(truncated)
         self.assertEqual(text, "def")
 
+    def test_clipboard_timeout_is_configurable(self):
+        with mock.patch.dict(os.environ, {"AIDUR_CLIPBOARD_TIMEOUT_SECONDS": "7.5"}, clear=True):
+            self.assertEqual(aidur.get_clipboard_timeout(), 7.5)
+
+    def test_clipboard_prompt_waits_for_user_input(self):
+        fake_fd = 42
+        with mock.patch.object(aidur.os, "open", return_value=fake_fd), \
+             mock.patch.object(aidur.os, "write"), \
+             mock.patch.object(aidur.os, "read", return_value=b"\n"), \
+             mock.patch.object(aidur.os, "close"), \
+             mock.patch.object(aidur.termios, "tcgetattr", return_value=[0]), \
+             mock.patch.object(aidur.termios, "tcsetattr"), \
+             mock.patch.object(aidur.tty, "setcbreak") as setcbreak, \
+             mock.patch.object(aidur.select, "select", return_value=([fake_fd], [], [])) as select_call:
+            self.assertTrue(aidur.prompt_include_clipboard())
+
+        setcbreak.assert_called_once_with(fake_fd)
+        self.assertIsNone(select_call.call_args.args[3])
+
+    def test_streaming_commands_update_config(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = os.path.join(tmpdir, "config.json")
+            env = {"AIDUR_CONFIG": config_path}
+            with mock.patch.dict(os.environ, env, clear=True), mock.patch("sys.stdout"):
+                self.assertEqual(aidur.main(["config", "streaming", "off"]), 0)
+                self.assertEqual(aidur.load_config()["streaming"], "off")
+                self.assertEqual(aidur.main(["config", "streaming", "on"]), 0)
+                self.assertEqual(aidur.load_config()["streaming"], "on")
+
+    def test_streaming_off_omits_stream_flag(self):
+        env = {"OPENCODE_ZEN_API_KEY": "key", "AIDUR_MODEL": "model"}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = os.path.join(tmpdir, "config.json")
+            with mock.patch.dict(os.environ, {"AIDUR_CONFIG": config_path}, clear=True):
+                aidur.save_config({"auto_clip": "off", "last_auto_clip_md5": "", "model": "", "streaming": "off"})
+            code, urlopen, _, _ = self.run_main(["hello"], {**env, "AIDUR_CONFIG": config_path})
+        self.assertEqual(code, 0)
+        payload = json.loads(urlopen.call_args.args[0].data.decode())
+        self.assertNotIn("stream", payload)
+
+    def test_streaming_sse_prints_deltas(self):
+        body = (
+            b"event: response.output_text.delta\n"
+            b"data: {\"delta\":\"hel\"}\n\n"
+            b"event: response.output_text.delta\n"
+            b"data: {\"delta\":\"lo\"}\n\n"
+            b"event: response.completed\n"
+            b"data: {}\n\n"
+        )
+        code, _, stdout, _ = self.run_main(
+            ["hello"],
+            {"OPENCODE_ZEN_API_KEY": "key", "AIDUR_MODEL": "model"},
+            response_body=body,
+        )
+        self.assertEqual(code, 0)
+        written = "".join(call.args[0] for call in stdout.write.call_args_list if call.args)
+        self.assertEqual(written, "hello\n")
+
+    def test_streaming_command_typo_does_not_call_api(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = os.path.join(tmpdir, "config.json")
+            with mock.patch.dict(os.environ, {"AIDUR_CONFIG": config_path}, clear=True), \
+                 mock.patch("urllib.request.urlopen") as urlopen, \
+                 mock.patch("sys.stderr") as stderr:
+                self.assertEqual(aidur.main(["config", "streaming", "wat"]), 2)
+        urlopen.assert_not_called()
+        written = "".join(call.args[0] for call in stderr.write.call_args_list if call.args)
+        self.assertIn("dur config streaming on|off", written)
+
     def test_auto_clip_commands_update_config(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = os.path.join(tmpdir, "config.json")
             env = {"AIDUR_CONFIG": config_path}
             with mock.patch.dict(os.environ, env, clear=True), mock.patch("sys.stdout"):
-                self.assertEqual(aidur.main(["auto-clip", "ask"]), 0)
+                self.assertEqual(aidur.main(["config", "include-clipboard", "ask"]), 0)
                 self.assertEqual(aidur.load_config()["auto_clip"], "ask")
-                self.assertEqual(aidur.main(["auto-clip", "off"]), 0)
+                self.assertEqual(aidur.main(["config", "include-clipboard", "never"]), 0)
                 self.assertEqual(aidur.load_config()["auto_clip"], "off")
-                self.assertEqual(aidur.main(["auto-clip", "on"]), 0)
+                self.assertEqual(aidur.main(["config", "include-clipboard", "always"]), 0)
                 self.assertEqual(aidur.load_config()["auto_clip"], "on")
 
     def test_auto_clip_command_typo_does_not_call_api(self):
-        for argv in (["auto-clip", "wat"], ["auto-clip", "status"], ["auto-clip-ask"]):
+        for argv in (["config", "include-clipboard", "wat"], ["config", "include-clipboard"], ["config", "wat"]):
             with self.subTest(argv=argv), tempfile.TemporaryDirectory() as tmpdir:
                 config_path = os.path.join(tmpdir, "config.json")
                 with mock.patch.dict(os.environ, {"AIDUR_CONFIG": config_path}, clear=True), \
@@ -248,7 +320,7 @@ class AidurTests(unittest.TestCase):
                     self.assertEqual(aidur.main(list(argv)), 2)
             urlopen.assert_not_called()
             written = "".join(call.args[0] for call in stderr.write.call_args_list if call.args)
-            self.assertIn("Usage: ai auto-clip on|ask|off", written)
+            self.assertIn("Usage: dur config include-clipboard always|ask|never", written)
 
     def test_status_shows_model_and_hides_remembered_fingerprint(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -260,7 +332,8 @@ class AidurTests(unittest.TestCase):
                 self.assertEqual(aidur.main(["status"]), 0)
         written = "".join(call.args[0] for call in stdout.write.call_args_list if call.args)
         self.assertIn("model: gpt-5.5 (config)", written)
-        self.assertIn("auto-clip: ask", written)
+        self.assertIn("include-clipboard: ask", written)
+        self.assertIn("streaming: on", written)
         self.assertIn("config:", written)
         self.assertNotIn("remembered", written)
         self.assertNotIn("abc", written)
@@ -281,10 +354,10 @@ class AidurTests(unittest.TestCase):
             config_path = os.path.join(tmpdir, "config.json")
             with mock.patch.dict(os.environ, {"AIDUR_CONFIG": config_path}, clear=True), \
                  mock.patch("sys.stdout") as stdout:
-                self.assertEqual(aidur.main(["models", "set", "gpt-5.5"]), 0)
+                self.assertEqual(aidur.main(["config", "model", "gpt-5.5"]), 0)
                 self.assertEqual(aidur.load_config()["model"], "gpt-5.5")
         written = "".join(call.args[0] for call in stdout.write.call_args_list if call.args)
-        self.assertIn("ai: model set to gpt-5.5", written)
+        self.assertIn("dur: model set to gpt-5.5", written)
 
     def test_models_set_rejects_unsupported_and_suggests(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -292,7 +365,7 @@ class AidurTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"AIDUR_CONFIG": config_path}, clear=True), \
                  mock.patch("urllib.request.urlopen") as urlopen, \
                  mock.patch("sys.stderr") as stderr:
-                self.assertEqual(aidur.main(["models", "set", "gipt-5.5"]), 2)
+                self.assertEqual(aidur.main(["config", "model", "gipt-5.5"]), 2)
         urlopen.assert_not_called()
         written = "".join(call.args[0] for call in stderr.write.call_args_list if call.args)
         self.assertIn("unsupported Responses model", written)
@@ -303,7 +376,7 @@ class AidurTests(unittest.TestCase):
             config_path = os.path.join(tmpdir, "config.json")
             with mock.patch.dict(os.environ, {"AIDUR_CONFIG": config_path}, clear=True), \
                  mock.patch("sys.stderr") as stderr:
-                self.assertEqual(aidur.main(["models", "set", "gpt-5.5-pro"]), 2)
+                self.assertEqual(aidur.main(["config", "model", "gpt-5.5-pro"]), 2)
         written = "".join(call.args[0] for call in stderr.write.call_args_list if call.args)
         self.assertIn("unsupported Responses model", written)
 
@@ -314,7 +387,7 @@ class AidurTests(unittest.TestCase):
                 aidur.save_config({"auto_clip": "off", "last_auto_clip_md5": "", "model": "gpt-5.5"})
             with mock.patch.dict(os.environ, {"AIDUR_CONFIG": config_path}, clear=True), \
                  mock.patch("sys.stdout") as stdout:
-                self.assertEqual(aidur.main(["models", "list"]), 0)
+                self.assertEqual(aidur.main(["models"]), 0)
         written = "".join(call.args[0] for call in stdout.write.call_args_list if call.args)
         self.assertIn("* gpt-5.5", written)
         self.assertIn("gpt-5.4-mini", written)
@@ -335,7 +408,7 @@ class AidurTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"AIDUR_CONFIG": config_path, "OPENCODE_ZEN_API_KEY": "key"}, clear=True), \
                  mock.patch("urllib.request.urlopen", return_value=FakeResponse(json.dumps(response).encode())) as urlopen, \
                  mock.patch("sys.stdout") as stdout:
-                self.assertEqual(aidur.main(["models", "list"]), 0)
+                self.assertEqual(aidur.main(["models"]), 0)
         urlopen.assert_called_once()
         written = "".join(call.args[0] for call in stdout.write.call_args_list if call.args)
         self.assertIn("gpt-5.5", written)
@@ -343,6 +416,33 @@ class AidurTests(unittest.TestCase):
         self.assertNotIn("gpt-5.5-pro", written)
         self.assertNotIn("claude", written)
         self.assertNotIn("qwen", written)
+
+    def test_auto_clip_off_mentions_clipboard_adds_status(self):
+        env = {"OPENCODE_ZEN_API_KEY": "key", "AIDUR_MODEL": "model"}
+        code, urlopen, _, _ = self.run_main(
+            ["can", "you", "see", "the", "clipboard?"],
+            env,
+        )
+        self.assertEqual(code, 0)
+        payload = json.loads(urlopen.call_args.args[0].data.decode())
+        self.assertIn("Clipboard status", payload["input"])
+        self.assertIn("persistent clipboard inclusion is disabled", payload["input"])
+
+    def test_auto_clip_empty_clipboard_adds_status(self):
+        env = {"OPENCODE_ZEN_API_KEY": "key", "AIDUR_MODEL": "model"}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = os.path.join(tmpdir, "config.json")
+            with mock.patch.dict(os.environ, {"AIDUR_CONFIG": config_path}, clear=True):
+                aidur.save_config({"auto_clip": "on", "last_auto_clip_md5": "", "model": "", "streaming": "on"})
+            with mock.patch.object(aidur, "read_clipboard", return_value=("", False, "abc")):
+                code, urlopen, _, _ = self.run_main(
+                    ["can", "you", "see", "the", "clipboard?"],
+                    {**env, "AIDUR_CONFIG": config_path},
+                )
+        self.assertEqual(code, 0)
+        payload = json.loads(urlopen.call_args.args[0].data.decode())
+        self.assertIn("Clipboard status", payload["input"])
+        self.assertIn("clipboard was empty", payload["input"])
 
     def test_auto_clip_on_includes_new_clipboard_and_remembers_md5(self):
         env = {"OPENCODE_ZEN_API_KEY": "key", "AIDUR_MODEL": "model"}
@@ -363,7 +463,7 @@ class AidurTests(unittest.TestCase):
             self.assertIn("Untrusted clipboard context", payload["input"])
             self.assertIn("pytest failed", payload["input"])
             written = "".join(call.args[0] for call in stderr.write.call_args_list if call.args)
-            self.assertIn("ai: sending clipboard data to agent", written)
+            self.assertIn("dur: sending clipboard data to agent", written)
             with mock.patch.dict(os.environ, {"AIDUR_CONFIG": config_path}, clear=True):
                 self.assertEqual(aidur.load_config()["last_auto_clip_md5"], "abc")
 
@@ -381,7 +481,8 @@ class AidurTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(urlopen.call_args.args[0].data.decode())
-        self.assertEqual(payload["input"], "what happened?")
+        self.assertIn("Clipboard status", payload["input"])
+        self.assertIn("already handled", payload["input"])
 
     def test_auto_clip_ask_includes_when_user_accepts_without_sending_reminder(self):
         env = {"OPENCODE_ZEN_API_KEY": "key", "AIDUR_MODEL": "model"}
@@ -400,7 +501,7 @@ class AidurTests(unittest.TestCase):
         payload = json.loads(urlopen.call_args.args[0].data.decode())
         self.assertIn("Untrusted clipboard context", payload["input"])
         written = "".join(call.args[0] for call in stderr.write.call_args_list if call.args)
-        self.assertNotIn("ai: sending clipboard data to agent", written)
+        self.assertNotIn("dur: sending clipboard data to agent", written)
 
     def test_auto_clip_ask_decline_remembers_md5_without_including(self):
         env = {"OPENCODE_ZEN_API_KEY": "key", "AIDUR_MODEL": "model"}
@@ -417,7 +518,8 @@ class AidurTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             payload = json.loads(urlopen.call_args.args[0].data.decode())
-            self.assertEqual(payload["input"], "what?")
+            self.assertIn("Clipboard status", payload["input"])
+            self.assertIn("user declined", payload["input"])
             with mock.patch.dict(os.environ, {"AIDUR_CONFIG": config_path}, clear=True):
                 self.assertEqual(aidur.load_config()["last_auto_clip_md5"], "abc")
 
@@ -435,6 +537,36 @@ class AidurTests(unittest.TestCase):
         payload = json.loads(urlopen.call_args.args[0].data.decode())
         self.assertIn("Untrusted stdin context", payload["input"])
         self.assertIn("command failed", payload["input"])
+
+    def test_debug_prints_request_payload_without_api_key(self):
+        env = {"OPENCODE_ZEN_API_KEY": "secret-key", "AIDUR_MODEL": "model"}
+        code, _, _, stderr = self.run_main(["--debug", "hello"], env)
+        self.assertEqual(code, 0)
+        written = "".join(call.args[0] for call in stderr.write.call_args_list if call.args)
+        self.assertIn("--- dur request ---", written)
+        self.assertIn("\"model\": \"model\"", written)
+        self.assertIn("\"input\": \"hello\"", written)
+        self.assertIn("\"instructions\"", written)
+        self.assertNotIn("secret-key", written)
+
+    def test_debug_and_include_clipboard_flags_are_order_insensitive(self):
+        env = {"OPENCODE_ZEN_API_KEY": "secret-key", "AIDUR_MODEL": "model"}
+        with mock.patch.object(aidur, "read_clipboard", return_value=("clip text", False, "md5")):
+            code, urlopen, _, stderr = self.run_main(["--include-clipboard", "--debug", "what?"], env)
+        self.assertEqual(code, 0)
+        payload = json.loads(urlopen.call_args.args[0].data.decode())
+        self.assertIn("clip text", payload["input"])
+        written = "".join(call.args[0] for call in stderr.write.call_args_list if call.args)
+        self.assertIn("--- dur request ---", written)
+        self.assertNotIn("secret-key", written)
+
+    def test_debug_help_prints_usage_without_api_call(self):
+        with mock.patch("urllib.request.urlopen") as urlopen, \
+             mock.patch("sys.stderr") as stderr:
+            self.assertEqual(aidur.main(["--debug", "help"]), 2)
+        urlopen.assert_not_called()
+        written = "".join(call.args[0] for call in stderr.write.call_args_list if call.args)
+        self.assertIn("Usage: dur", written)
 
     def test_http_error_redacts_api_key(self):
         error = HTTPError("https://x", 401, "Unauthorized", {}, io.BytesIO(b"bad secret-key"))

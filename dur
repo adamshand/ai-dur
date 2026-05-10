@@ -67,12 +67,12 @@ def eprint(message):
 
 def usage():
     eprint(
-        "Usage: ai [--debug] [--include-clipboard] <question>\n"
-        "       ai config include-clipboard always|ask|never\n"
-        "       ai config streaming on|off\n"
-        "       ai config model <model>\n"
-        "       ai models\n"
-        "       ai status"
+        "Usage: dur [--debug] [--include-clipboard] <question>\n"
+        "       dur config include-clipboard always|ask|never\n"
+        "       dur config streaming on|off\n"
+        "       dur config model <model>\n"
+        "       dur models\n"
+        "       dur status"
     )
     return 2
 
@@ -308,7 +308,7 @@ def fetch_models(api_key, timeout):
         headers={
             "Authorization": f"Bearer {api_key}",
             "Accept": "application/json",
-            "User-Agent": "aidur/0.1",
+            "User-Agent": "dur/0.1",
         },
         method="GET",
     )
@@ -339,25 +339,25 @@ def set_model(model_id):
     if not response_model_id(model_id):
         known_ids = [model["id"] for model in known_response_models()]
         suggestion = difflib.get_close_matches(model_id, known_ids, n=1)
-        eprint(f"ai: unsupported Responses model: {model_id}")
+        eprint(f"dur: unsupported Responses model: {model_id}")
         if suggestion:
             eprint(f"Did you mean: {suggestion[0]}?")
-        eprint("Run: ai models")
+        eprint("Run: dur models")
         return 2
     config = load_config()
     config["model"] = model_id
     save_config(config)
-    print(f"ai: model set to {model_id}")
+    print(f"dur: model set to {model_id}")
     if os.environ.get("AIDUR_MODEL"):
-        eprint("ai: note: AIDUR_MODEL is set and overrides the saved model")
+        eprint("dur: note: AIDUR_MODEL is set and overrides the saved model")
     return 0
 
 
 def config_help():
     eprint(
-        "Usage: ai config include-clipboard always|ask|never\n"
-        "       ai config streaming on|off\n"
-        "       ai config model <model>"
+        "Usage: dur config include-clipboard always|ask|never\n"
+        "       dur config streaming on|off\n"
+        "       dur config model <model>"
     )
     return 2
 
@@ -369,7 +369,7 @@ def handle_config_command(command):
         print_models()
         return 0
     if command == "models-help":
-        eprint("Usage: ai models")
+        eprint("Usage: dur models")
         return 2
     if command == "config-help":
         return config_help()
@@ -379,13 +379,13 @@ def handle_config_command(command):
         mode = command[1]
         config["streaming"] = mode
         save_config(config)
-        print(f"ai: streaming {mode}")
+        print(f"dur: streaming {mode}")
         return 0
     if isinstance(command, tuple) and command[0] == "include-clipboard":
         label = command[1]
         config["auto_clip"] = CLIPBOARD_MODE_VALUES[label]
         save_config(config)
-        print(f"ai: include-clipboard {label}")
+        print(f"dur: include-clipboard {label}")
         return 0
     if command == "status":
         model, source = effective_model(config)
@@ -584,7 +584,7 @@ def prompt_include_clipboard():
 
     old_attrs = None
     try:
-        os.write(fd, b"ai: clipboard content detected, send to agent? [Enter=yes, Esc=no]\n")
+        os.write(fd, b"dur: clipboard content detected, send to agent? [Enter=yes, Esc=no]\n")
         old_attrs = termios.tcgetattr(fd)
         tty.setcbreak(fd)
         readable, _, _ = select.select([fd], [], [], None)
@@ -675,21 +675,21 @@ def maybe_add_auto_clipboard(question, max_bytes):
         return build_clipboard_status_question(question, "user declined to include clipboard")
 
     if mode == "on":
-        eprint("ai: sending clipboard data to agent")
+        eprint("dur: sending clipboard data to agent")
     config["last_auto_clip_md5"] = md5
     save_config(config)
     return build_clipboard_question(question, clipboard_text, truncated)
 
 
 def debug_request(url, request):
-    eprint("--- aidur request ---")
+    eprint("--- dur request ---")
     eprint(f"url: {url}")
     try:
         payload = json.loads(request.data.decode("utf-8"))
         eprint(json.dumps(payload, indent=2, ensure_ascii=False))
     except (AttributeError, TypeError, ValueError, UnicodeDecodeError):
-        eprint("ai: could not render debug request payload")
-    eprint("--- end aidur request ---")
+        eprint("dur: could not render debug request payload")
+    eprint("--- end dur request ---")
 
 
 def build_request(url, api_key, model, question, stream=False):
@@ -708,7 +708,7 @@ def build_request(url, api_key, model, question, stream=False):
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "User-Agent": "aidur/0.1",
+            "User-Agent": "dur/0.1",
         },
         method="POST",
     )
@@ -730,7 +730,7 @@ def dispatch_sse_event(event_name, data_lines):
         return "done", False
     if "error" in event_type or event_type.endswith(".failed"):
         error = parsed.get("error") or parsed.get("message") or parsed
-        eprint(f"ai: stream error: {redact_api_key(str(error))}")
+        eprint(f"dur: stream error: {redact_api_key(str(error))}")
         return "error", False
 
     delta = parsed.get("delta")
@@ -807,7 +807,7 @@ def stream_answer(response):
         print(parse_answer(b"".join(fallback_chunks)))
         return 0
 
-    eprint("ai: could not parse response")
+    eprint("dur: could not parse response")
     return 1
 
 
@@ -818,10 +818,10 @@ def parse_answer(data):
         if answer is None:
             answer = parsed["output"][0]["content"][0]["text"]
     except (KeyError, IndexError, TypeError, ValueError, UnicodeDecodeError):
-        eprint("ai: could not parse response")
+        eprint("dur: could not parse response")
         sys.exit(1)
     if not isinstance(answer, str):
-        eprint("ai: could not parse response")
+        eprint("dur: could not parse response")
         sys.exit(1)
     return answer
 
@@ -847,7 +847,7 @@ def main(argv):
 
     api_key = require_env(
         "OPENCODE_ZEN_API_KEY",
-        'Missing OPENCODE_ZEN_API_KEY.\nSet it with:\n  set -Ux OPENCODE_ZEN_API_KEY "..."',
+        'Missing OPENCODE_ZEN_API_KEY.\nSet it in your shell, for example:\n  export OPENCODE_ZEN_API_KEY="..."',
     )
     config = load_config()
     model, _ = effective_model(config)
@@ -859,20 +859,20 @@ def main(argv):
         try:
             clipboard_text, truncated, _ = read_clipboard(max_bytes)
         except ClipboardUnavailable as exc:
-            eprint(f"ai: clipboard unavailable: {exc}")
+            eprint(f"dur: clipboard unavailable: {exc}")
             return 1
         except InputUnavailable as exc:
-            eprint(f"ai: clipboard unavailable: {exc}")
+            eprint(f"dur: clipboard unavailable: {exc}")
             return 1
         if clipboard_text == "":
-            eprint("ai: clipboard is empty")
+            eprint("dur: clipboard is empty")
             return 2
         question = build_clipboard_question(question, clipboard_text, truncated)
     else:
         try:
             stdin_context = read_piped_stdin(max_bytes)
         except InputUnavailable as exc:
-            eprint(f"ai: stdin unavailable: {exc}")
+            eprint(f"dur: stdin unavailable: {exc}")
             return 1
         if stdin_context is not None:
             stdin_text, truncated = stdin_context
@@ -890,7 +890,7 @@ def main(argv):
             status = response.getcode()
             if status < 200 or status >= 300:
                 data = response.read()
-                eprint(f"ai: API returned HTTP {status}")
+                eprint(f"dur: API returned HTTP {status}")
                 if data:
                     eprint(bounded_decode(data))
                 return 1
@@ -899,18 +899,18 @@ def main(argv):
             data = response.read()
     except urllib.error.HTTPError as exc:
         body = bounded_decode(exc.read())
-        eprint(f"ai: API returned HTTP {exc.code}")
+        eprint(f"dur: API returned HTTP {exc.code}")
         if body:
             eprint(body)
         return 1
     except urllib.error.URLError as exc:
-        eprint(f"ai: request failed: {redact_api_key(str(exc.reason))}")
+        eprint(f"dur: request failed: {redact_api_key(str(exc.reason))}")
         return 1
     except TimeoutError as exc:
-        eprint(f"ai: request failed: {redact_api_key(str(exc))}")
+        eprint(f"dur: request failed: {redact_api_key(str(exc))}")
         return 1
     except OSError as exc:
-        eprint(f"ai: request failed: {redact_api_key(str(exc))}")
+        eprint(f"dur: request failed: {redact_api_key(str(exc))}")
         return 1
 
     print(parse_answer(data))
@@ -921,5 +921,5 @@ if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv[1:]))
     except KeyboardInterrupt:
-        eprint("ai: interrupted")
+        eprint("dur: interrupted")
         sys.exit(130)
