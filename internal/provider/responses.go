@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -87,6 +88,15 @@ func (c Client) ResponsesURL() string { return strings.TrimRight(c.BaseURL, "/")
 func (c Client) ModelsURL() string    { return strings.TrimRight(c.BaseURL, "/") + "/v1/models" }
 
 func (c Client) Do(ctx context.Context, req Request) (Response, error) {
+	return c.do(ctx, req, nil)
+}
+
+func (c Client) Stream(ctx context.Context, req Request, onText func(string)) (Response, error) {
+	req.Stream = true
+	return c.do(ctx, req, onText)
+}
+
+func (c Client) do(ctx context.Context, req Request, onText func(string)) (Response, error) {
 	if c.APIKey == "" {
 		return Response{}, errors.New("missing OPENCODE_ZEN_API_KEY")
 	}
@@ -107,15 +117,25 @@ func (c Client) Do(ctx context.Context, req Request) (Response, error) {
 		return Response{}, err
 	}
 	defer res.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(res.Body, 8<<20))
+	bodyLimit := int64(8 << 20)
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(res.Body, bodyLimit))
 		return Response{}, fmt.Errorf("API returned HTTP %d\n%s", res.StatusCode, string(limit(body, 4096)))
 	}
+	contentType := res.Header.Get("Content-Type")
+	if req.Stream && strings.Contains(contentType, "text/event-stream") {
+		return parseSSE(res.Body, onText)
+	}
+	body, _ := io.ReadAll(io.LimitReader(res.Body, bodyLimit))
 	var raw map[string]any
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return Response{}, err
 	}
-	return ParseResponse(raw), nil
+	parsed := ParseResponse(raw)
+	if onText != nil && parsed.Answer != "" {
+		onText(parsed.Answer)
+	}
+	return parsed, nil
 }
 
 func (c Client) Models(ctx context.Context) ([]string, error) {
@@ -202,6 +222,188 @@ func ParseResponse(raw map[string]any) Response {
 		}
 	}
 	return r
+}
+
+type streamToolCall struct {
+	CallID    string
+	Name      string
+	Arguments strings.Builder
+	Raw       map[string]any
+}
+
+func parseSSE(reader io.Reader, onText func(string)) (Response, error) {
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	eventName := ""
+	var dataLines []string
+	response := Response{Raw: map[string]any{}}
+	calls := map[string]*streamToolCall{}
+	callOrder := []string{}
+
+	dispatch := func() error {
+		if len(dataLines) == 0 {
+			return nil
+		}
+		data := strings.Join(dataLines, "\n")
+		event := eventName
+		eventName = ""
+		dataLines = nil
+		if strings.TrimSpace(data) == "[DONE]" {
+			return nil
+		}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(data), &payload); err != nil {
+			return nil
+		}
+		if typ, _ := payload["type"].(string); typ != "" {
+			event = typ
+		}
+		switch event {
+		case "response.output_text.delta":
+			if delta, _ := payload["delta"].(string); delta != "" {
+				response.Answer += delta
+				if onText != nil {
+					onText(delta)
+				}
+			}
+		case "response.output_item.added":
+			item, _ := payload["item"].(map[string]any)
+			if itemType, _ := item["type"].(string); itemType == "function_call" {
+				key := streamItemKey(payload, item)
+				if key == "" {
+					key = fmt.Sprintf("call_%d", len(callOrder)+1)
+				}
+				if _, ok := calls[key]; !ok {
+					calls[key] = &streamToolCall{Raw: item}
+					callOrder = append(callOrder, key)
+				}
+				mergeCallItem(calls[key], item)
+			}
+		case "response.function_call_arguments.delta":
+			key := streamPayloadKey(payload)
+			if key == "" && len(callOrder) > 0 {
+				key = callOrder[len(callOrder)-1]
+			}
+			if key != "" {
+				if _, ok := calls[key]; !ok {
+					calls[key] = &streamToolCall{}
+					callOrder = append(callOrder, key)
+				}
+				if delta, _ := payload["delta"].(string); delta != "" {
+					calls[key].Arguments.WriteString(delta)
+				}
+			}
+		case "response.output_item.done":
+			item, _ := payload["item"].(map[string]any)
+			if itemType, _ := item["type"].(string); itemType == "function_call" {
+				key := streamItemKey(payload, item)
+				if key == "" {
+					key = streamPayloadKey(payload)
+				}
+				if key == "" && len(callOrder) > 0 {
+					key = callOrder[len(callOrder)-1]
+				}
+				if key != "" {
+					if _, ok := calls[key]; !ok {
+						calls[key] = &streamToolCall{Raw: item}
+						callOrder = append(callOrder, key)
+					}
+					mergeCallItem(calls[key], item)
+				}
+			}
+		case "response.completed":
+			if rawResponse, ok := payload["response"].(map[string]any); ok {
+				full := ParseResponse(rawResponse)
+				if response.Answer == "" {
+					response.Answer = full.Answer
+				}
+				if len(full.ToolCalls) > 0 {
+					response.ToolCalls = full.ToolCalls
+				}
+				response.Raw = rawResponse
+			}
+		}
+		return nil
+	}
+
+	for scanner.Scan() {
+		line := strings.TrimRight(scanner.Text(), "\r")
+		if line == "" {
+			if err := dispatch(); err != nil {
+				return response, err
+			}
+			continue
+		}
+		if strings.HasPrefix(line, ":") {
+			continue
+		}
+		if strings.HasPrefix(line, "event:") {
+			eventName = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+			continue
+		}
+		if strings.HasPrefix(line, "data:") {
+			dataLines = append(dataLines, strings.TrimLeft(strings.TrimPrefix(line, "data:"), " "))
+			continue
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return response, err
+	}
+	if len(dataLines) > 0 {
+		if err := dispatch(); err != nil {
+			return response, err
+		}
+	}
+	if len(response.ToolCalls) == 0 {
+		for _, key := range callOrder {
+			call := calls[key]
+			args := call.Arguments.String()
+			if args == "" && call.Raw != nil {
+				args, _ = call.Raw["arguments"].(string)
+			}
+			response.ToolCalls = append(response.ToolCalls, FunctionCall{CallID: call.CallID, Name: call.Name, Arguments: args, Raw: call.Raw})
+		}
+	}
+	return response, nil
+}
+
+func streamPayloadKey(payload map[string]any) string {
+	for _, key := range []string{"item_id", "output_item_id", "call_id", "id"} {
+		if value, _ := payload[key].(string); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func streamItemKey(payload map[string]any, item map[string]any) string {
+	if key := streamPayloadKey(payload); key != "" {
+		return key
+	}
+	for _, key := range []string{"id", "call_id"} {
+		if value, _ := item[key].(string); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func mergeCallItem(call *streamToolCall, item map[string]any) {
+	if call.Raw == nil {
+		call.Raw = item
+	}
+	if call.CallID == "" {
+		call.CallID, _ = item["call_id"].(string)
+	}
+	if call.CallID == "" {
+		call.CallID, _ = item["id"].(string)
+	}
+	if call.Name == "" {
+		call.Name, _ = item["name"].(string)
+	}
+	if args, _ := item["arguments"].(string); args != "" && call.Arguments.Len() == 0 {
+		call.Arguments.WriteString(args)
+	}
 }
 
 func ToolDefinition() ToolSchema {

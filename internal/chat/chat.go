@@ -141,7 +141,7 @@ func (s *Session) command(line string) bool {
 		}
 		s.Model, _ = config.EffectiveModel(s.Cfg)
 		fmt.Println("dur: model set to", fields[1])
-	case "/status":
+	case "/config", "/status":
 		model, src := config.EffectiveModel(config.Load())
 		s.Model = model
 		fmt.Println("model:", model, "("+src+")")
@@ -170,14 +170,28 @@ func (s *Session) turn() error {
 		if s.Debug {
 			debugRequest(req)
 		}
-		res, err := s.Provider.Do(context.Background(), req)
+		printedAgent := false
+		res, err := s.Provider.Stream(context.Background(), req, func(delta string) {
+			if !printedAgent {
+				fmt.Print("\n\033[32magent>\033[0m ")
+				printedAgent = true
+			}
+			fmt.Print(delta)
+		})
 		if err != nil {
 			return err
 		}
 		if len(res.ToolCalls) == 0 {
-			fmt.Printf("\n\033[32magent>\033[0m %s\n\n", res.Answer)
+			if printedAgent {
+				fmt.Print("\n\n")
+			} else {
+				fmt.Printf("\n\033[32magent>\033[0m %s\n\n", res.Answer)
+			}
 			s.History = append(s.History, map[string]any{"role": "assistant", "content": res.Answer})
 			return nil
+		}
+		if printedAgent {
+			fmt.Print("\n")
 		}
 		for _, call := range res.ToolCalls {
 			var args struct {
@@ -203,11 +217,22 @@ func (s *Session) turn() error {
 		}
 	}
 	s.History = append(s.History, map[string]any{"role": "user", "content": "Tool-call limit reached. Do not request more tools. Summarize findings from tool results already provided."})
-	res, err := s.Provider.Do(context.Background(), provider.Request{Model: s.Model, Instructions: provider.ChatPrompt, Input: s.History})
+	printedAgent := false
+	res, err := s.Provider.Stream(context.Background(), provider.Request{Model: s.Model, Instructions: provider.ChatPrompt, Input: s.History}, func(delta string) {
+		if !printedAgent {
+			fmt.Print("\n\033[32magent>\033[0m ")
+			printedAgent = true
+		}
+		fmt.Print(delta)
+	})
 	if err != nil {
 		return err
 	}
-	fmt.Printf("\n\033[32magent>\033[0m %s\n\n", res.Answer)
+	if printedAgent {
+		fmt.Print("\n\n")
+	} else {
+		fmt.Printf("\n\033[32magent>\033[0m %s\n\n", res.Answer)
+	}
 	return nil
 }
 
@@ -245,6 +270,7 @@ func in(s string, xs ...string) bool {
 
 const helpText = `dur chat commands:
   /help
+  /config
   /status
   /models
   /model <id>

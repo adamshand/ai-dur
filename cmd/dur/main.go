@@ -64,7 +64,7 @@ func oneShot(question string, debug bool) int {
 		fmt.Fprintln(os.Stderr, string(b))
 		fmt.Fprintln(os.Stderr, "--- end dur request ---")
 	}
-	res, err := client.Do(context.Background(), req)
+	res, err := client.Stream(context.Background(), req, func(delta string) { fmt.Print(delta) })
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "dur:", err)
 		return 1
@@ -73,7 +73,7 @@ func oneShot(question string, debug bool) int {
 		fmt.Fprintln(os.Stderr, "dur: could not parse response")
 		return 1
 	}
-	fmt.Println(res.Answer)
+	fmt.Println()
 	return 0
 }
 

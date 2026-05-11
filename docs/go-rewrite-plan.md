@@ -22,6 +22,7 @@ No top-level config/model/status subcommands in the Go UX. Those belong inside c
 
 ```text
 /help
+/config
 /status
 /models
 /model <id>
@@ -44,7 +45,7 @@ No OSC 52 clipboard feature in Go v1. Users can paste into chat, pipe stdin into
 
 ## Streaming
 
-Final Go direction: streaming on by default, no normal user-facing streaming toggle. Initial implementation may use non-streaming for chat/tool calls until an SSE tool-call accumulator is implemented.
+Streaming is on by default with no normal user-facing streaming toggle. The provider layer parses SSE text deltas and buffers function-call argument deltas until a complete tool call is available. Tools are never executed from partial streamed arguments.
 
 ## Provider
 
