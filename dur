@@ -9,6 +9,10 @@ import hashlib
 import json
 import os
 import re
+try:
+    import readline
+except ImportError:  # pragma: no cover - depends on Python build/platform
+    readline = None
 import select
 import shutil
 import subprocess
@@ -106,10 +110,19 @@ CHAT_HELP_TEXT = """dur chat commands:
   /pwd         show the current tool working directory
   /cd <path>   change the tool working directory
   /tools       list available read-only tools
+  /tools verbose on|off
+               show or hide full tool results as they run; default is off
+  /tool N      show command/stdout/stderr for a previous tool call
+  /tool last   show the most recent tool call
+  /models      list available models
+  /model <id>  set the persistent model and use it for new chat turns
+  /status      show model/config/chat status
+  /streaming on|off
+               set the persistent streaming preference for plain dur
   /exit        quit
   /quit        quit
 
-Chat history is kept in memory only. Tools are read-only, shell-free, bounded, and output is redacted/capped.
+Chat history is kept in memory only. readline/emacs editing is enabled when available. Tools are read-only, shell-free, bounded, and output is redacted/capped. Chat mode currently uses non-streaming responses so tool calls can be parsed safely.
 """.rstrip()
 
 TOOLS_TEXT = """read-only tools:
@@ -125,6 +138,14 @@ notable limits:
   ping: bounded count/deadline, no flood
   find: safe internal subset; no -exec/-delete/-print-to-file actions
 """.rstrip()
+
+ANSI = {
+    "red": "\033[31m",
+    "green": "\033[32m",
+    "blue": "\033[34m",
+    "reset": "\033[0m",
+}
+
 
 TOOL_SCHEMA = [{
     "type": "function",
@@ -159,6 +180,19 @@ class InputUnavailable(Exception):
 
 class ToolDenied(Exception):
     pass
+
+
+def stream_is_tty(stream):
+    try:
+        return stream.isatty()
+    except (AttributeError, OSError):
+        return False
+
+
+def colorize(text, color, stream):
+    if not stream_is_tty(stream):
+        return text
+    return f"{ANSI[color]}{text}{ANSI['reset']}"
 
 
 def eprint(message):
@@ -1576,6 +1610,41 @@ def print_chat_banner(cwd):
     print("type /help for commands, /exit to quit")
 
 
+def print_tool_record(record):
+    label = colorize(f"tool {record['id']}>", "blue", sys.stdout)
+    print(f"\n{label} {record['trace']}\n{record['result']}\n")
+
+
+def print_chat_status(state):
+    config = load_config()
+    model, source = effective_model(config)
+    if state.get("model") != model:
+        state["model"] = model
+    auto_clip = config.get("auto_clip", "off")
+    print(f"model: {model} ({source})")
+    print(f"include-clipboard: {CLIPBOARD_MODE_LABELS.get(auto_clip, 'never')}")
+    print(f"streaming: {config.get('streaming', 'on')} (plain dur; chat currently uses non-streaming tool loop)")
+    print(f"tool cwd: {state['cwd']}")
+    print(f"tool verbosity: {'on' if state.get('tools_verbose') else 'off'}")
+    print(f"tool calls: {len(state.get('tools', []))}")
+    print(f"config: {config_path()}")
+
+
+def set_chat_model(model_id, state):
+    code = set_model(model_id)
+    if code == 0:
+        state["model"], _ = effective_model(load_config())
+    return code
+
+
+def set_chat_streaming(mode):
+    config = load_config()
+    config["streaming"] = mode
+    save_config(config)
+    print(f"dur: streaming {mode}")
+    return 0
+
+
 def handle_chat_command(line, state):
     stripped = line.strip()
     if stripped in {"/exit", "/quit"}:
@@ -1583,8 +1652,51 @@ def handle_chat_command(line, state):
     if stripped == "/help":
         print(CHAT_HELP_TEXT)
         return "handled"
+    if stripped == "/models":
+        print_models()
+        return "handled"
+    if stripped.startswith("/model"):
+        parts = stripped.split(maxsplit=1)
+        if len(parts) != 2 or not parts[1].strip():
+            eprint("Usage: /model <model>")
+            return "handled"
+        set_chat_model(parts[1].strip(), state)
+        return "handled"
+    if stripped == "/status":
+        print_chat_status(state)
+        return "handled"
+    if stripped.startswith("/streaming"):
+        parts = stripped.split(maxsplit=1)
+        if len(parts) != 2 or parts[1].strip() not in STREAMING_MODES:
+            eprint("Usage: /streaming on|off")
+            return "handled"
+        set_chat_streaming(parts[1].strip())
+        return "handled"
     if stripped == "/tools":
         print(TOOLS_TEXT)
+        return "handled"
+    if stripped in {"/tools verbose on", "/tools verbose off"}:
+        state["tools_verbose"] = stripped.endswith(" on")
+        print(f"tool verbosity: {'on' if state['tools_verbose'] else 'off'}")
+        return "handled"
+    if stripped.startswith("/tool "):
+        token = stripped.split(maxsplit=1)[1].strip()
+        if token == "last":
+            if not state["tools"]:
+                eprint("dur: no tool calls yet")
+                return "handled"
+            print_tool_record(state["tools"][-1])
+            return "handled"
+        try:
+            tool_id = int(token)
+        except ValueError:
+            eprint("Usage: /tool N")
+            return "handled"
+        for record in state["tools"]:
+            if record["id"] == tool_id:
+                print_tool_record(record)
+                return "handled"
+        eprint(f"dur: no such tool call: {tool_id}")
         return "handled"
     if stripped == "/pwd":
         print(state["cwd"])
@@ -1623,9 +1735,9 @@ def append_tool_call_history(history, call):
         })
 
 
-def run_chat_turn(history, state, api_key, model, url, timeout, debug=False):
+def run_chat_turn(history, state, api_key, url, timeout, debug=False):
     for _ in range(MAX_TOOL_CALLS_PER_TURN + 1):
-        request = build_chat_request(url, api_key, model, history)
+        request = build_chat_request(url, api_key, state["model"], history)
         if debug:
             debug_request(url, request)
         parsed = request_json(request, timeout)
@@ -1635,6 +1747,8 @@ def run_chat_turn(history, state, api_key, model, url, timeout, debug=False):
         tool_calls = response_tool_calls(parsed)
         if tool_calls:
             for call in tool_calls:
+                tool_id = len(state["tools"]) + 1
+                trace = str(call.get("name") or "unknown_tool")
                 if call.get("name") != "run_readonly_command":
                     result = format_tool_result(str(call.get("name")), [], 2, "", "denied: unknown tool")
                 else:
@@ -1644,10 +1758,14 @@ def run_chat_turn(history, state, api_key, model, url, timeout, debug=False):
                         args = arguments.get("args", [])
                         normalized_args = normalize_tool_args(args)
                         trace = " ".join([str(cmd)] + normalized_args)
-                        eprint(f"[tool] {trace}")
                         result = run_readonly_command(cmd, normalized_args, state["cwd"])
                     except ToolDenied as exc:
                         result = format_tool_result("run_readonly_command", [], 2, "", f"denied: {exc}")
+                record = {"id": tool_id, "trace": trace, "result": result}
+                state["tools"].append(record)
+                eprint(colorize(f"[tool {tool_id}] {trace}", "blue", sys.stderr))
+                if state.get("tools_verbose"):
+                    print_tool_record(record)
                 append_tool_call_history(history, call)
                 history.append({
                     "type": "function_call_output",
@@ -1660,7 +1778,8 @@ def run_chat_turn(history, state, api_key, model, url, timeout, debug=False):
         if answer is None:
             eprint("dur: could not parse response")
             return 1
-        print(answer)
+        label = colorize("agent>", "green", sys.stdout)
+        print(f"\n{label} {answer}\n")
         history.append({"role": "assistant", "content": answer})
         return 0
 
@@ -1668,7 +1787,20 @@ def run_chat_turn(history, state, api_key, model, url, timeout, debug=False):
     return 1
 
 
+def setup_chat_readline():
+    if readline is None:
+        return
+    try:
+        readline.clear_history()
+        readline.set_history_length(200)
+        readline.parse_and_bind("set editing-mode emacs")
+        readline.parse_and_bind("set enable-keypad on")
+    except (AttributeError, OSError):
+        pass
+
+
 def run_chat(debug=False):
+    setup_chat_readline()
     api_key = require_env(
         "OPENCODE_ZEN_API_KEY",
         'Missing OPENCODE_ZEN_API_KEY.\nSet it in your shell, for example:\n  export OPENCODE_ZEN_API_KEY="..."',
@@ -1677,13 +1809,13 @@ def run_chat(debug=False):
     model, _ = effective_model(config)
     url = response_endpoint_url()
     timeout = get_timeout()
-    state = {"cwd": os.getcwd()}
+    state = {"cwd": os.getcwd(), "tools": [], "tools_verbose": False, "model": model}
     history = []
     print_chat_banner(state["cwd"])
 
     while True:
         try:
-            line = input("dur> ")
+            line = input("\n" + colorize("dur>", "red", sys.stdout) + " ")
         except EOFError:
             print()
             return 0
@@ -1698,7 +1830,7 @@ def run_chat(debug=False):
         if command_result == "handled":
             continue
         history.append({"role": "user", "content": line})
-        run_chat_turn(history, state, api_key, model, url, timeout, debug=debug)
+        run_chat_turn(history, state, api_key, url, timeout, debug=debug)
 
 
 def main(argv):

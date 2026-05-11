@@ -109,7 +109,7 @@ Start an ephemeral troubleshooting chat with read-only tools enabled:
 dur chat
 ```
 
-Chat state is kept in memory only. Use `/help`, `/tools`, `/pwd`, `/cd <path>`, `/exit`, and `/quit` inside the chat. Tools run without a shell, with allowlisted commands, validators, time/output caps, and secret redaction.
+Chat state is kept in memory only. If Python's stdlib `readline` module is available, chat enables emacs-style line editing and in-memory input history. Use `/help`, `/tools`, `/pwd`, `/cd <path>`, `/tool N`, `/tool last`, `/models`, `/model <id>`, `/status`, `/streaming on|off`, `/exit`, and `/quit` inside the chat. Tool traces are one-line by default, for example `[tool 2] ls /etc`; `/tool 2` prints that tool call's command, stdout, and stderr. Tools run without a shell, with allowlisted commands, validators, time/output caps, and secret redaction. Chat mode currently uses non-streaming API responses so tool calls can be parsed safely.
 
 Print the exact request body sent to the agent, including system prompt and user/context payload, to stderr:
 

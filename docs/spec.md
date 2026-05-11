@@ -643,7 +643,7 @@ dur: could not parse response
 
 ## Ephemeral chat with read-only tools
 
-`dur chat` starts a REPL. Conversation and tool results are kept only in memory and are discarded when the process exits. Chat tools are always enabled.
+`dur chat` starts a REPL. Conversation, readline history, and tool results are kept only in memory and are discarded when the process exits. Chat tools are always enabled. If Python's stdlib `readline` module is available, chat enables emacs-style line editing. Chat mode currently uses non-streaming API responses so tool calls can be parsed safely.
 
 Slash commands:
 
@@ -652,6 +652,15 @@ Slash commands:
 /pwd         show the current tool working directory
 /cd <path>   change the current tool working directory
 /tools       list allowed tools and limits
+/tools verbose on|off
+             show or hide full tool results as they run; default is off
+/tool N      show command/stdout/stderr for a previous tool call
+/tool last   show the most recent tool call
+/models      list available models
+/model <id>  set the persistent model and use it for new chat turns
+/status      show model/config/chat status
+/streaming on|off
+             set the persistent streaming preference for plain dur
 /exit        quit
 /quit        quit
 ```
