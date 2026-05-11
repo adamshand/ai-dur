@@ -665,7 +665,7 @@ Slash commands:
 /quit        quit
 ```
 
-The assistant has one function tool, `run_readonly_command`, with `{cmd, args}`. Aidur must run commands with `shell=False`, no stdin, a trusted binary path, a timeout, output caps, secret redaction, and command-specific validators.
+The assistant has one function tool, `run_readonly_command`, with `{cmd, args}`. Aidur must run commands with `shell=False`, no stdin, a trusted binary path, a timeout, output caps, secret redaction, command-specific validators, and bounded per-turn tool calls/rounds.
 
 Allowed commands include:
 
@@ -675,7 +675,7 @@ df free uptime uname id whoami hostname ps ss ip
 dig whois ping dmesg journalctl systemctl docker find
 ```
 
-`find` is an internal safe subset supporting paths under the chat cwd plus `-name`, `-iname`, `-path`, `-ipath`, `-type f|d|l`, `-maxdepth`, `-mindepth`, and `-print`. It must deny `-exec`, `-execdir`, `-ok`, `-okdir`, `-delete`, `-fprint`, `-fls`, `-fprintf`, and `-printf`.
+`find` is an internal safe subset supporting paths anywhere on the system plus `-name`, `-iname`, `-path`, `-ipath`, `-type f|d|l`, `-maxdepth`, `-mindepth`, and `-print`. It must deny `-exec`, `-execdir`, `-ok`, `-okdir`, `-delete`, `-fprint`, `-fls`, `-fprintf`, and `-printf`. Content-reading tools may read paths outside the chat cwd, but must deny obvious sensitive private-key/credential filenames such as SSH private keys, `.env`, `.netrc`, `*.pem`, `*.key`, `*.p12`, and `*.pfx`, while still allowing public key files such as `*.pub`.
 
 Tool limits are configurable through:
 

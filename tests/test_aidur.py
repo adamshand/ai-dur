@@ -623,14 +623,36 @@ class AidurTests(unittest.TestCase):
             pathlib.Path(tmpdir, "app.py").write_text("print('hi')\n")
             result = aidur.run_readonly_command("find", [".", "-name", "*.py", "-type", "f"], tmpdir)
             denied = aidur.run_readonly_command("find", [".", "-delete"], tmpdir)
+            exec_denied = aidur.run_readonly_command("find", [".", "-exec", "id", ";"], tmpdir)
         self.assertIn("app.py", result)
         self.assertIn("find action not allowed", denied)
+        self.assertIn("find action not allowed: -exec", exec_denied)
 
     def test_readonly_tool_rejects_mutating_ip_dmesg_and_hostname(self):
         self.assertIn("mutating ip", aidur.run_readonly_command("ip", ["link", "set", "eth0", "down"], os.getcwd()))
         self.assertIn("dmesg option not allowed", aidur.run_readonly_command("dmesg", ["--clear"], os.getcwd()))
         self.assertIn("hostname arguments are not allowed", aidur.run_readonly_command("hostname", ["new-host"], os.getcwd()))
         self.assertIn("journalctl line count", aidur.run_readonly_command("journalctl", ["-n", "all"], os.getcwd()))
+
+    def test_readonly_tool_rejects_obvious_sensitive_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ssh_dir = pathlib.Path(tmpdir, ".ssh")
+            ssh_dir.mkdir()
+            pathlib.Path(ssh_dir, "id_rsa").write_text("private key")
+            pathlib.Path(ssh_dir, "authorized_keys").write_text("ssh-rsa public")
+            denied = aidur.run_readonly_command("cat", [".ssh/id_rsa"], tmpdir)
+            allowed = aidur.run_readonly_command("cat", [".ssh/authorized_keys"], tmpdir)
+        self.assertIn("sensitive file path is not allowed", denied)
+        self.assertIn("ssh-rsa public", allowed)
+
+    def test_readonly_tools_can_read_outside_cwd(self):
+        with tempfile.TemporaryDirectory() as outside, tempfile.TemporaryDirectory() as cwd:
+            target = pathlib.Path(outside, "hostname")
+            target.write_text("prod-1\n")
+            result = aidur.run_readonly_command("cat", [str(target)], cwd)
+            found = aidur.run_readonly_command("find", [outside, "-maxdepth", "1", "-type", "f", "-name", "hostname"], cwd)
+        self.assertIn("prod-1", result)
+        self.assertIn("hostname", found)
 
 
 if __name__ == "__main__":

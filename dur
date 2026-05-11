@@ -81,13 +81,17 @@ CHAT_SYSTEM_PROMPT = SYSTEM_PROMPT + (
     "\nIn dur chat, you may inspect the machine using the run_readonly_command tool. "
     "Use tools when they help debug concrete local/system questions. "
     "Do not claim to have changed anything; tools are read-only. "
+    "Allowed commands are: pwd, ls, stat, file, wc, head, tail, cat, rg, grep, df, free, uptime, uname, id, whoami, hostname, ps, ss, ip, dig, whois, ping, dmesg, journalctl, systemctl, docker, find. "
+    "Unavailable commands will be denied; do not repeatedly probe obviously unavailable commands. "
     "Prefer narrow commands and explain important findings. "
-    "Never request unavailable, mutating, interactive, or long-running commands."
+    "If you are auditing tool safety, avoid repeating the same low-value probe and summarize once denials establish a control. "
+    "Never request mutating, interactive, or long-running commands."
 )
 
 DEFAULT_TOOL_TIMEOUT_SECONDS = 10
 DEFAULT_TOOL_MAX_BYTES = 65536
-MAX_TOOL_CALLS_PER_TURN = 8
+MAX_TOOL_ROUNDS_PER_TURN = 12
+MAX_TOOL_CALLS_PER_TURN = 40
 TRUSTED_BIN_DIRS = (
     "/bin",
     "/usr/bin",
@@ -150,7 +154,7 @@ ANSI = {
 TOOL_SCHEMA = [{
     "type": "function",
     "name": "run_readonly_command",
-    "description": "Run a bounded read-only diagnostic command without a shell. Use only for inspecting local files, processes, services, logs, network state, DNS, Docker state, or filesystem names.",
+    "description": "Run a bounded read-only diagnostic command without a shell. Allowed commands: pwd, ls, stat, file, wc, head, tail, cat, rg, grep, df, free, uptime, uname, id, whoami, hostname, ps, ss, ip, dig, whois, ping, dmesg, journalctl, systemctl, docker, find. Mutating commands, shells, interpreters, recursive grep, rg preprocessors/hidden/no-ignore modes, tail/log follow modes, unsafe systemctl/docker/journalctl/ip/dmesg options, and find exec/delete/file-writing actions are denied. Do not repeat denied probes; summarize what the denial proves.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -789,6 +793,7 @@ def truncate_text(text, max_chars):
 
 def redact_secrets(text):
     patterns = [
+        (r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", "[REDACTED PRIVATE KEY]"),
         (r"(?i)(authorization\s*:\s*bearer\s+)[^\s]+", r"\1[REDACTED]"),
         (r"(?i)((?:api[_-]?key|secret(?:[_-]?key)?|token|password|passwd|database_url|db_url|access[_-]?token|refresh[_-]?token)\s*[=:]\s*)[^\s'\"\\]+", r"\1[REDACTED]"),
         (r"(?i)((?:api[_-]?key|secret(?:[_-]?key)?|token|password|passwd|database_url|db_url|access[_-]?token|refresh[_-]?token)\"\s*:\s*\")[^\"]+", r"\1[REDACTED]"),
@@ -801,7 +806,7 @@ def redact_secrets(text):
 
 
 def shell_syntax_present(args):
-    shell_tokens = {"|", "||", "&", "&&", ";", "<", ">", ">>", "2>", "2>>", "`"}
+    shell_tokens = {"|", "||", "&", "&&", "<", ">", ">>", "2>", "2>>", "`"}
     return any(arg in shell_tokens or "\x00" in arg for arg in args)
 
 
@@ -834,17 +839,30 @@ def resolve_tool_binary(cmd):
     raise ToolDenied(f"command not found: {cmd}")
 
 
-def path_within_cwd(path, cwd):
-    base = os.path.realpath(cwd)
-    target = os.path.realpath(os.path.join(cwd, os.path.expanduser(path)))
-    return target == base or target.startswith(base + os.sep)
+SENSITIVE_FILE_BASENAMES = {
+    "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "identity", ".env", ".env.local",
+    ".env.production", ".netrc", "credentials", "credentials.json",
+}
+SENSITIVE_FILE_SUFFIXES = (".pem", ".p12", ".pfx", ".key")
+
+
+def resolve_tool_path(path, cwd):
+    return os.path.realpath(os.path.join(cwd, os.path.expanduser(path)))
+
+
+def sensitive_path(path):
+    name = os.path.basename(path)
+    lowered = name.lower()
+    if lowered.endswith(".pub"):
+        return False
+    return lowered in SENSITIVE_FILE_BASENAMES or lowered.endswith(SENSITIVE_FILE_SUFFIXES)
 
 
 def looks_like_path(arg):
     return arg in {".", ".."} or "/" in arg or arg.startswith("~")
 
 
-def validate_path_args_under_cwd(args, cwd, skip_first_non_flag=0):
+def validate_path_args(args, cwd, skip_first_non_flag=0, deny_sensitive=False):
     skipped = 0
     i = 0
     options_with_values = {
@@ -870,12 +888,12 @@ def validate_path_args_under_cwd(args, cwd, skip_first_non_flag=0):
             skipped += 1
             i += 1
             continue
-        if looks_like_path(arg) and not path_within_cwd(arg, cwd):
-            raise ToolDenied(f"path escapes current directory: {arg}")
+        if looks_like_path(arg) and deny_sensitive and sensitive_path(resolve_tool_path(arg, cwd)):
+            raise ToolDenied(f"sensitive file path is not allowed: {arg}")
         i += 1
     for arg in args[i:]:
-        if looks_like_path(arg) and not path_within_cwd(arg, cwd):
-            raise ToolDenied(f"path escapes current directory: {arg}")
+        if looks_like_path(arg) and deny_sensitive and sensitive_path(resolve_tool_path(arg, cwd)):
+            raise ToolDenied(f"sensitive file path is not allowed: {arg}")
 
 
 def contains_any_arg(args, forbidden):
@@ -910,7 +928,7 @@ def has_short_flag(args, flag):
 def validate_tail(args, cwd):
     if contains_any_arg(args, {"-f", "--follow", "--follow="}) or has_short_flag(args, "-f"):
         raise ToolDenied("tail follow mode is not allowed")
-    validate_path_args_under_cwd(args, cwd)
+    validate_path_args(args, cwd, deny_sensitive=True)
     return args
 
 
@@ -918,17 +936,22 @@ def validate_rg(args, cwd):
     for arg in args:
         if arg == "--pre" or arg.startswith("--pre=") or arg == "--pre-glob" or arg.startswith("--pre-glob="):
             raise ToolDenied("rg preprocessors are not allowed")
-    validate_path_args_under_cwd(args, cwd, skip_first_non_flag=1)
+        if arg in {"--hidden", "--no-ignore", "-u", "-uu", "-uuu"}:
+            raise ToolDenied("rg options that include hidden/ignored files are not allowed")
+    validate_path_args(args, cwd, skip_first_non_flag=1, deny_sensitive=True)
     return ["--no-config"] + args
 
 
 def validate_grep(args, cwd):
-    validate_path_args_under_cwd(args, cwd, skip_first_non_flag=1)
+    for arg in args:
+        if arg in {"-r", "-R", "--recursive", "--dereference-recursive"} or (arg.startswith("-") and not arg.startswith("--") and ("r" in arg[1:] or "R" in arg[1:])):
+            raise ToolDenied("recursive grep is not allowed; use rg's safer defaults")
+    validate_path_args(args, cwd, skip_first_non_flag=1, deny_sensitive=True)
     return args
 
 
-def validate_file_read_args(args, cwd):
-    validate_path_args_under_cwd(args, cwd)
+def validate_file_read_args(args, cwd, deny_sensitive=False):
+    validate_path_args(args, cwd, deny_sensitive=deny_sensitive)
     return args
 
 
@@ -1082,7 +1105,9 @@ def validate_ping(args, cwd):
 
 
 def validate_simple_inspection(cmd, args, cwd):
-    if cmd in {"cat", "head", "stat", "file", "wc", "ls"}:
+    if cmd in {"cat", "head"}:
+        return validate_file_read_args(args, cwd, deny_sensitive=True)
+    if cmd in {"stat", "file", "wc", "ls"}:
         return validate_file_read_args(args, cwd)
     if cmd == "tail":
         return validate_tail(args, cwd)
@@ -1199,9 +1224,7 @@ def parse_safe_find_args(args, cwd):
             raise ToolDenied(f"find expression operator not supported: {arg}")
         if arg.startswith("-"):
             raise ToolDenied(f"find option not supported: {arg}")
-        if not path_within_cwd(arg, cwd):
-            raise ToolDenied(f"find root escapes current directory: {arg}")
-        roots.append(os.path.realpath(os.path.join(cwd, os.path.expanduser(arg))))
+        roots.append(resolve_tool_path(arg, cwd))
         i += 1
     if not roots:
         roots = [cwd]
@@ -1349,13 +1372,14 @@ def build_request(url, api_key, model, question, stream=False):
     )
 
 
-def build_chat_request(url, api_key, model, input_items):
+def build_chat_request(url, api_key, model, input_items, tools=True):
     body = {
         "model": model,
         "instructions": CHAT_SYSTEM_PROMPT,
         "input": input_items,
-        "tools": TOOL_SCHEMA,
     }
+    if tools:
+        body["tools"] = TOOL_SCHEMA
     data = json.dumps(body).encode("utf-8")
     return urllib.request.Request(
         url,
@@ -1736,7 +1760,8 @@ def append_tool_call_history(history, call):
 
 
 def run_chat_turn(history, state, api_key, url, timeout, debug=False):
-    for _ in range(MAX_TOOL_CALLS_PER_TURN + 1):
+    tool_calls_used = 0
+    for _ in range(MAX_TOOL_ROUNDS_PER_TURN):
         request = build_chat_request(url, api_key, state["model"], history)
         if debug:
             debug_request(url, request)
@@ -1749,7 +1774,9 @@ def run_chat_turn(history, state, api_key, url, timeout, debug=False):
             for call in tool_calls:
                 tool_id = len(state["tools"]) + 1
                 trace = str(call.get("name") or "unknown_tool")
-                if call.get("name") != "run_readonly_command":
+                if tool_calls_used >= MAX_TOOL_CALLS_PER_TURN:
+                    result = format_tool_result(trace, [], 2, "", "denied: tool call limit reached for this turn; summarize findings without more tools")
+                elif call.get("name") != "run_readonly_command":
                     result = format_tool_result(str(call.get("name")), [], 2, "", "denied: unknown tool")
                 else:
                     try:
@@ -1761,6 +1788,7 @@ def run_chat_turn(history, state, api_key, url, timeout, debug=False):
                         result = run_readonly_command(cmd, normalized_args, state["cwd"])
                     except ToolDenied as exc:
                         result = format_tool_result("run_readonly_command", [], 2, "", f"denied: {exc}")
+                tool_calls_used += 1
                 denied = "\nstderr:\ndenied:" in result
                 record = {"id": tool_id, "trace": trace, "result": result, "denied": denied}
                 state["tools"].append(record)
@@ -1774,6 +1802,11 @@ def run_chat_turn(history, state, api_key, url, timeout, debug=False):
                     "call_id": call["call_id"],
                     "output": result,
                 })
+            if tool_calls_used >= MAX_TOOL_CALLS_PER_TURN:
+                history.append({
+                    "role": "user",
+                    "content": "Tool call limit reached for this turn. Please stop requesting tools and summarize the findings from the tool results already provided.",
+                })
             continue
 
         answer = response_answer(parsed)
@@ -1785,8 +1818,25 @@ def run_chat_turn(history, state, api_key, url, timeout, debug=False):
         history.append({"role": "assistant", "content": answer})
         return 0
 
-    eprint("dur: too many tool calls in one turn")
-    return 1
+    history.append({
+        "role": "user",
+        "content": "Tool-call round limit reached. Do not request more tools. Summarize the safety findings from the tool results already provided, including any denied probes and any remaining uncertainty.",
+    })
+    eprint("dur: tool-call round limit reached; asking agent to summarize without more tools")
+    request = build_chat_request(url, api_key, state["model"], history, tools=False)
+    if debug:
+        debug_request(url, request)
+    parsed = request_json(request, timeout)
+    if parsed is None:
+        return 1
+    answer = response_answer(parsed)
+    if answer is None:
+        eprint("dur: could not parse response")
+        return 1
+    label = colorize("agent>", "green", sys.stdout)
+    print(f"\n{label} {answer}\n")
+    history.append({"role": "assistant", "content": answer})
+    return 0
 
 
 def setup_chat_readline():
