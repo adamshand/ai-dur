@@ -1761,9 +1761,11 @@ def run_chat_turn(history, state, api_key, url, timeout, debug=False):
                         result = run_readonly_command(cmd, normalized_args, state["cwd"])
                     except ToolDenied as exc:
                         result = format_tool_result("run_readonly_command", [], 2, "", f"denied: {exc}")
-                record = {"id": tool_id, "trace": trace, "result": result}
+                denied = "\nstderr:\ndenied:" in result
+                record = {"id": tool_id, "trace": trace, "result": result, "denied": denied}
                 state["tools"].append(record)
-                eprint(colorize(f"[tool {tool_id}] {trace}", "blue", sys.stderr))
+                label = f"[tool {tool_id} denied]" if denied else f"[tool {tool_id}]"
+                eprint(colorize(f"{label} {trace}", "blue", sys.stderr))
                 if state.get("tools_verbose"):
                     print_tool_record(record)
                 append_tool_call_history(history, call)
