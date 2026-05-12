@@ -15,7 +15,7 @@ import (
 	toolrunner "github.com/adamshand/aidur/internal/tools"
 )
 
-const Version = "0.1.0-go"
+var Version = "dev"
 
 func main() { os.Exit(run(os.Args[1:])) }
 
