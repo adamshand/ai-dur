@@ -120,6 +120,39 @@ func TestBottomPadRowsAccountsForTranscript(t *testing.T) {
 	}
 }
 
+func TestLiveContentRowsLeavesRoomForFooter(t *testing.T) {
+	if got := liveContentRows(10, true); got != 7 {
+		t.Fatalf("liveContentRows with transcript = %d, want 7", got)
+	}
+	if got := liveContentRows(10, false); got != 8 {
+		t.Fatalf("liveContentRows without transcript = %d, want 8", got)
+	}
+	if got := liveContentRows(1, true); got != 1 {
+		t.Fatalf("liveContentRows tiny terminal = %d, want 1", got)
+	}
+}
+
+func TestTrimLiveLinesShowsTailWithinLimit(t *testing.T) {
+	lines := []string{"one", "two", "three", "four"}
+	got := trimLiveLines(lines, 3)
+	if len(got) != 3 {
+		t.Fatalf("len(trimLiveLines) = %d, want 3", len(got))
+	}
+	if !strings.Contains(stripANSI(got[0]), "2 lines above") {
+		t.Fatalf("trim indicator = %q, want omitted line count", got[0])
+	}
+	if got[1] != "three" || got[2] != "four" {
+		t.Fatalf("trimmed tail = %#v, want three/four", got)
+	}
+}
+
+func TestTrimLiveLinesOneRowShowsIndicator(t *testing.T) {
+	got := trimLiveLines([]string{"one", "two"}, 1)
+	if len(got) != 1 || !strings.Contains(stripANSI(got[0]), "2 lines above") {
+		t.Fatalf("trimLiveLines one row = %#v, want indicator", got)
+	}
+}
+
 func TestRenderStatusBarPadsToFullWidth(t *testing.T) {
 	bar := renderStatusBar("abc", 8)
 	plain := stripANSI(bar)

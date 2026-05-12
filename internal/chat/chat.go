@@ -755,10 +755,42 @@ func bottomPadRows(height, transcriptRows, liveRows int) int {
 	return pad
 }
 
+func liveContentRows(height int, hasTranscript bool) int {
+	rows := height - footerTopPaddingRows - 1
+	if hasTranscript {
+		rows--
+	}
+	if rows < 1 {
+		return 1
+	}
+	return rows
+}
+
+func trimLiveLines(lines []string, maxRows int) []string {
+	if maxRows <= 0 {
+		return nil
+	}
+	if len(lines) <= maxRows {
+		return lines
+	}
+	omitted := len(lines) - maxRows + 1
+	indicator := dim + fmt.Sprintf("… %d lines above", omitted) + reset
+	if maxRows == 1 {
+		return []string{indicator}
+	}
+	trimmed := make([]string, 0, maxRows)
+	trimmed = append(trimmed, indicator)
+	trimmed = append(trimmed, lines[len(lines)-maxRows+1:]...)
+	return trimmed
+}
+
 func (ui *TerminalUI) renderLiveLocked() {
-	w, _, err := term.GetSize(int(os.Stdout.Fd()))
+	w, h, err := term.GetSize(int(os.Stdout.Fd()))
 	if err != nil || w <= 0 {
 		w = 80
+	}
+	if err != nil || h <= 0 {
+		h = 24
 	}
 	status := ""
 	if ui.statusFunc != nil {
@@ -780,6 +812,7 @@ func (ui *TerminalUI) renderLiveLocked() {
 			text = ui.deltaSpinnerTextLocked()
 		}
 		activeLines = renderMessageWithAgentName(item.Role, text, w, ui.displayAgentNameLocked())
+		activeLines = trimLiveLines(activeLines, liveContentRows(h, len(ui.items) > 0))
 	}
 
 	row := 0
