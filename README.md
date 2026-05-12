@@ -109,6 +109,7 @@ Inside chat:
 /cd <path>                         change tool working directory
 /debug on|off                      toggle debug request output
 /quit                              exit
+! ls /etc                          run command so agent can see results
 ```
 
 ## Sudo
