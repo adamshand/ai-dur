@@ -46,7 +46,7 @@ type ReasoningSpec struct {
 }
 
 func Reasoning(effort string) *ReasoningSpec {
-	if effort == "" {
+	if effort == "" || effort == "off" {
 		return nil
 	}
 	return &ReasoningSpec{Effort: effort}

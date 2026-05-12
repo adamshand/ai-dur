@@ -79,7 +79,7 @@ func EffectiveThinking(cfg Config) (thinking, source string) {
 
 func ValidThinking(value string) bool {
 	switch value {
-	case "minimal", "low", "medium", "high":
+	case "off", "low", "medium", "high":
 		return true
 	default:
 		return false

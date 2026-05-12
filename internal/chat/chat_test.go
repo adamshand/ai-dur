@@ -34,6 +34,51 @@ func TestRenderInputWideRuneCursorUsesDisplayWidth(t *testing.T) {
 	}
 }
 
+func TestModifiedEnterSequenceLen(t *testing.T) {
+	cases := []string{
+		"\x1b[13;2u",
+		"\x1b[13;2;1u",
+		"\x1b[27;2;13~",
+	}
+	for _, tc := range cases {
+		n, ok := modifiedEnterSequenceLen(tc + "rest")
+		if !ok {
+			t.Fatalf("modifiedEnterSequenceLen(%q) ok=false, want true", tc)
+		}
+		if n != len(tc) {
+			t.Fatalf("modifiedEnterSequenceLen(%q) len=%d, want %d", tc, n, len(tc))
+		}
+	}
+	if _, ok := modifiedEnterSequenceLen("\x1b[13;1u"); ok {
+		t.Fatalf("plain CSI-u enter matched as modified enter")
+	}
+}
+
+func TestParseTerminalKeySequence(t *testing.T) {
+	cases := []struct {
+		seq  string
+		code rune
+		mod  int
+	}{
+		{"\x1b[13u", 13, 1},
+		{"\x1b[13;5u", 13, 5},
+		{"\x1b[13;9u", 13, 9},
+		{"\x1b[27u", 27, 1},
+		{"\x1b[100;5u", 'd', 5},
+		{"\x1b[122;5u", 'z', 5},
+		{"\x1b[27;5;100~", 'd', 5},
+	}
+	for _, tc := range cases {
+		n, code, mod, ok := parseTerminalKeySequence(tc.seq + "rest")
+		if !ok {
+			t.Fatalf("parseTerminalKeySequence(%q) ok=false, want true", tc.seq)
+		}
+		if n != len(tc.seq) || code != tc.code || mod != tc.mod {
+			t.Fatalf("parseTerminalKeySequence(%q) = (%d,%q,%d), want (%d,%q,%d)", tc.seq, n, code, mod, len(tc.seq), tc.code, tc.mod)
+		}
+	}
+}
+
 func TestBottomPadRowsAccountsForTranscript(t *testing.T) {
 	if got := bottomPadRows(25, 3, 2); got != 20 {
 		t.Fatalf("bottomPadRows = %d, want 20", got)
@@ -66,5 +111,20 @@ func TestStatusBarStyle(t *testing.T) {
 	}
 	if got := statusBarStyle(501, true, true); got != statusBarRoot {
 		t.Fatalf("sudo+ssh style = %q, want root %q", got, statusBarRoot)
+	}
+}
+
+func TestUserPromptColor(t *testing.T) {
+	if got := userPromptColor(501, false, false); got != white {
+		t.Fatalf("normal prompt color = %q, want %q", got, white)
+	}
+	if got := userPromptColor(501, false, true); got != yellow {
+		t.Fatalf("ssh prompt color = %q, want %q", got, yellow)
+	}
+	if got := userPromptColor(0, false, true); got != red {
+		t.Fatalf("root+ssh prompt color = %q, want %q", got, red)
+	}
+	if got := userPromptColor(501, true, true); got != red {
+		t.Fatalf("sudo+ssh prompt color = %q, want %q", got, red)
 	}
 }

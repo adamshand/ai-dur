@@ -5,6 +5,18 @@ import (
 	"testing"
 )
 
+func TestReasoningOffDisablesReasoningSpec(t *testing.T) {
+	if Reasoning("off") != nil {
+		t.Fatalf("Reasoning(off) != nil")
+	}
+	if Reasoning("") != nil {
+		t.Fatalf("Reasoning(empty) != nil")
+	}
+	if got := Reasoning("medium"); got == nil || got.Effort != "medium" {
+		t.Fatalf("Reasoning(medium) = %+v, want medium spec", got)
+	}
+}
+
 func TestParseSSETextDeltas(t *testing.T) {
 	body := strings.NewReader("event: response.output_text.delta\ndata: {\"delta\":\"hel\"}\n\nevent: response.output_text.delta\ndata: {\"delta\":\"lo\"}\n\nevent: response.completed\ndata: {}\n\n")
 	var streamed strings.Builder
