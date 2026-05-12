@@ -42,3 +42,29 @@ func TestBottomPadRowsAccountsForTranscript(t *testing.T) {
 		t.Fatalf("bottomPadRows overflow = %d, want 0", got)
 	}
 }
+
+func TestRenderStatusBarPadsToFullWidth(t *testing.T) {
+	bar := renderStatusBar("abc", 8)
+	plain := stripANSI(bar)
+	if plain != "abc     " {
+		t.Fatalf("plain status bar = %q, want %q", plain, "abc     ")
+	}
+	if visibleWidthNoANSI(bar) != 8 {
+		t.Fatalf("visible width = %d, want 8", visibleWidthNoANSI(bar))
+	}
+}
+
+func TestStatusBarStyle(t *testing.T) {
+	if got := statusBarStyle(501, false, false); got != statusBarNormal {
+		t.Fatalf("normal style = %q, want %q", got, statusBarNormal)
+	}
+	if got := statusBarStyle(501, false, true); got != statusBarSSH {
+		t.Fatalf("ssh style = %q, want %q", got, statusBarSSH)
+	}
+	if got := statusBarStyle(0, false, true); got != statusBarRoot {
+		t.Fatalf("root+ssh style = %q, want root %q", got, statusBarRoot)
+	}
+	if got := statusBarStyle(501, true, true); got != statusBarRoot {
+		t.Fatalf("sudo+ssh style = %q, want root %q", got, statusBarRoot)
+	}
+}

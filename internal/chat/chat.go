@@ -22,11 +22,16 @@ import (
 )
 
 const (
-	red   = "\033[31m"
-	green = "\033[32m"
-	blue  = "\033[34m"
-	dim   = "\033[2m"
-	reset = "\033[0m"
+	red             = "\033[31m"
+	green           = "\033[32m"
+	blue            = "\033[34m"
+	dim             = "\033[2m"
+	statusBarNormal = "\033[37m\033[48;5;236m"
+	statusBarSSH    = "\033[30m\033[48;5;178m"
+	statusBarRoot   = "\033[30m\033[48;5;167m"
+	reset           = "\033[0m"
+
+	footerTopPaddingRows = 1
 )
 
 type Session struct {
@@ -120,6 +125,7 @@ func (ui *TerminalUI) Run() error {
 	defer ui.restore()
 	fmt.Print("\033[?2004h")
 	defer fmt.Print("\033[?2004l\033[?25h")
+	defer ui.finish()
 	ui.mu.Lock()
 	_, h, sizeErr := term.GetSize(int(os.Stdout.Fd()))
 	if sizeErr != nil || h <= 0 {
@@ -151,6 +157,14 @@ func (ui *TerminalUI) restore() {
 	if ui.oldState != nil {
 		_ = term.Restore(int(os.Stdin.Fd()), ui.oldState)
 	}
+}
+
+func (ui *TerminalUI) finish() {
+	ui.mu.Lock()
+	defer ui.mu.Unlock()
+	fmt.Print(reset)
+	ui.clearLiveLocked()
+	fmt.Print("\r\n")
 }
 
 func (ui *TerminalUI) handleData(data string) {
@@ -478,7 +492,7 @@ func (ui *TerminalUI) padToBottomLocked(height int, transcriptRows int) {
 	if err != nil || w <= 0 {
 		w = 80
 	}
-	liveRows := len(renderInputLinesOnly(userName(), ui.input, w)) + 1
+	liveRows := len(renderInputLinesOnly(userName(), ui.input, w)) + 1 + footerTopPaddingRows
 	if transcriptRows > 0 {
 		liveRows++
 	}
@@ -550,7 +564,10 @@ func (ui *TerminalUI) renderLiveLocked() {
 			writeLine(line)
 		}
 	}
-	writeLine(dim + truncatePlain(status, w) + reset)
+	for range footerTopPaddingRows {
+		writeLine("")
+	}
+	writeLine(renderStatusBar(status, w))
 
 	ui.liveLines = row
 	ui.cursorRow = cursorLine
@@ -821,6 +838,40 @@ func truncatePlain(s string, width int) string {
 		col += rw
 	}
 	return b.String() + "…"
+}
+
+func renderStatusBar(status string, width int) string {
+	if width < 1 {
+		width = 1
+	}
+	text := truncatePlain(status, width)
+	pad := width - runewidth.StringWidth(text)
+	if pad > 0 {
+		text += strings.Repeat(" ", pad)
+	}
+	return currentStatusBarStyle() + text + reset
+}
+
+func currentStatusBarStyle() string {
+	return statusBarStyle(os.Geteuid(), inSudoSession(), inSSHSession())
+}
+
+func statusBarStyle(euid int, sudo bool, ssh bool) string {
+	if euid == 0 || sudo {
+		return statusBarRoot
+	}
+	if ssh {
+		return statusBarSSH
+	}
+	return statusBarNormal
+}
+
+func inSudoSession() bool {
+	return os.Getenv("SUDO_USER") != "" || os.Getenv("SUDO_UID") != "" || os.Getenv("SUDO_COMMAND") != ""
+}
+
+func inSSHSession() bool {
+	return os.Getenv("SSH_CONNECTION") != "" || os.Getenv("SSH_CLIENT") != "" || os.Getenv("SSH_TTY") != ""
 }
 
 func (s *Session) beginTurn() (context.Context, func()) {
