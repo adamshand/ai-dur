@@ -34,6 +34,16 @@ func TestRenderInputWideRuneCursorUsesDisplayWidth(t *testing.T) {
 	}
 }
 
+func TestRenderMessageUsesConfiguredAgentName(t *testing.T) {
+	lines := renderMessageWithAgentName("agent", "hello", 80, "edda")
+	if len(lines) != 1 {
+		t.Fatalf("len(lines) = %d, want 1", len(lines))
+	}
+	if got := stripANSI(lines[0]); got != "edda> hello" {
+		t.Fatalf("rendered agent line = %q, want %q", got, "edda> hello")
+	}
+}
+
 func TestModifiedEnterSequenceLen(t *testing.T) {
 	cases := []string{
 		"\x1b[13;2u",

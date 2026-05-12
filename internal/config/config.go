@@ -4,14 +4,18 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
+	"unicode"
 )
 
 const DefaultModel = "gpt-5.4-mini"
 const DefaultThinking = "medium"
+const DefaultAgentName = "aidur"
 
 type Config struct {
-	Model    string `json:"model"`
-	Thinking string `json:"thinking"`
+	Model     string `json:"model"`
+	Thinking  string `json:"thinking"`
+	AgentName string `json:"agent_name"`
 }
 
 func Path() string {
@@ -77,6 +81,16 @@ func EffectiveThinking(cfg Config) (thinking, source string) {
 	return DefaultThinking, "default"
 }
 
+func EffectiveAgentName(cfg Config) (name, source string) {
+	if env, ok := NormalizeAgentName(os.Getenv("AIDUR_AGENT_NAME")); ok {
+		return env, "AIDUR_AGENT_NAME"
+	}
+	if name, ok := NormalizeAgentName(cfg.AgentName); ok {
+		return name, "config"
+	}
+	return DefaultAgentName, "default"
+}
+
 func ValidThinking(value string) bool {
 	switch value {
 	case "off", "low", "medium", "high":
@@ -84,6 +98,19 @@ func ValidThinking(value string) bool {
 	default:
 		return false
 	}
+}
+
+func NormalizeAgentName(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" || len([]rune(value)) > 32 {
+		return "", false
+	}
+	for _, r := range value {
+		if unicode.IsSpace(r) || unicode.IsControl(r) || r == '>' || r == ':' {
+			return "", false
+		}
+	}
+	return value, true
 }
 
 func expandHome(path string) string {

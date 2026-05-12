@@ -22,6 +22,8 @@ func main() { os.Exit(run(os.Args[1:])) }
 func run(argv []string) int {
 	debug := false
 	useTools := false
+	modelsFlag := false
+	modelOverride := ""
 	toolMaxCalls := 20
 	var args []string
 	for i := 0; i < len(argv); i++ {
@@ -29,6 +31,19 @@ func run(argv []string) int {
 		switch {
 		case a == "--debug":
 			debug = true
+		case a == "--models":
+			modelsFlag = true
+		case a == "--model":
+			if i+1 >= len(argv) {
+				fmt.Fprintln(os.Stderr, "dur: --model requires a model id")
+				return 2
+			}
+			i++
+			if !provider.ResponseModelID(argv[i]) {
+				fmt.Fprintln(os.Stderr, "dur: unsupported Responses model: "+argv[i])
+				return 2
+			}
+			modelOverride = argv[i]
 		case a == "--tools":
 			if i+1 >= len(argv) {
 				fmt.Fprintln(os.Stderr, "dur: --tools requires on|off")
@@ -56,8 +71,8 @@ func run(argv []string) int {
 				return 2
 			}
 			toolMaxCalls = n
-		case strings.HasPrefix(a, "--tool-max-calls=") || strings.HasPrefix(a, "--tools="):
-			fmt.Fprintln(os.Stderr, "dur: use space-separated options, e.g. --tools on --tool-max-calls 20")
+		case strings.HasPrefix(a, "--tool-max-calls=") || strings.HasPrefix(a, "--tools=") || strings.HasPrefix(a, "--model="):
+			fmt.Fprintln(os.Stderr, "dur: use space-separated options, e.g. --model gpt-5.4 --tools on --tool-max-calls 20")
 			return 2
 		default:
 			args = append(args, a)
@@ -71,27 +86,39 @@ func run(argv []string) int {
 		fmt.Println(Version)
 		return 0
 	}
+	if modelsFlag {
+		if len(args) > 0 {
+			fmt.Fprintln(os.Stderr, "dur: --models does not take a question")
+			return 2
+		}
+		model := modelOverride
+		if model == "" {
+			cfg := config.Load()
+			model, _ = config.EffectiveModel(cfg)
+		}
+		return printModels(model)
+	}
 	stdin, hasStdin, err := readPipedStdin()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "dur: stdin unavailable:", err)
 		return 1
 	}
-	if len(args) == 0 && !hasStdin {
-		return chat.Run(debug)
+	if len(args) == 0 {
+		return chat.Run(debug, modelOverride, stdin)
 	}
 	question := strings.Join(args, " ")
-	if question == "" && hasStdin {
-		question = "Explain this stdin content and suggest practical next steps."
-	}
 	if hasStdin {
 		question = buildStdinQuestion(question, stdin)
 	}
-	return oneShot(question, debug, useTools, toolMaxCalls)
+	return oneShot(question, debug, useTools, toolMaxCalls, modelOverride)
 }
 
-func oneShot(question string, debug bool, useTools bool, toolMaxCalls int) int {
+func oneShot(question string, debug bool, useTools bool, toolMaxCalls int, modelOverride string) int {
 	cfg := config.Load()
 	model, _ := config.EffectiveModel(cfg)
+	if modelOverride != "" {
+		model = modelOverride
+	}
 	thinking, _ := config.EffectiveThinking(cfg)
 	client := provider.New()
 	if useTools {
@@ -182,6 +209,18 @@ func oneShotWithTools(question string, debug bool, model string, thinking string
 	return 0
 }
 
+func printModels(currentModel string) int {
+	models, _ := provider.New().Models(context.Background())
+	for _, model := range models {
+		mark := " "
+		if model == currentModel {
+			mark = "*"
+		}
+		fmt.Println(mark, model)
+	}
+	return 0
+}
+
 func toolStatus(rec toolrunner.Record) string {
 	if rec.Denied {
 		return "✕"
@@ -221,10 +260,14 @@ func buildStdinQuestion(question, stdin string) string {
 func usage() {
 	fmt.Fprintln(os.Stderr, `Usage:
   dur                         Start an ephemeral chat
-  dur [--debug] <question>     Ask a one-shot question
+  dur [--debug] [--model ID] <question>
+                              Ask a one-shot question
+  dur --model ID               Start chat with a model override
+  dur --models                 List available models
   dur --tools on [--tool-max-calls N] <question>
                               Ask a one-shot question with read-only tools
-  command | dur [question]     Ask about stdin context
+  command | dur                Start chat with stdin context
+  command | dur <question>     Ask one-shot question with stdin context
   dur --help                   Show help
   dur --version                Show version`)
 }
