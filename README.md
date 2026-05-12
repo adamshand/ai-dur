@@ -1,4 +1,4 @@
-<img width="100%" alt="aidur propaganda" src="https://github.com/user-attachments/assets/c1c07b69-5a41-481b-b839-ce7bb1d0f0bf" />
+<img width="100%"  alt="b634d5e1-10f3-4de5-9534-310ca5529641" src="https://github.com/user-attachments/assets/a6215996-02bf-4413-a1df-b3beba2e63e6" />
 
 # AI-dur
 
