@@ -19,6 +19,7 @@ type Session struct {
 	Provider provider.Client
 	Cfg      config.Config
 	Model    string
+	Thinking string
 	Debug    bool
 	Runner   *tools.Runner
 	History  []map[string]any
@@ -27,9 +28,10 @@ type Session struct {
 func Run(debug bool) int {
 	cfg := config.Load()
 	model, _ := config.EffectiveModel(cfg)
+	thinking, _ := config.EffectiveThinking(cfg)
 	cwd, _ := os.Getwd()
-	s := &Session{Provider: provider.New(), Cfg: cfg, Model: model, Debug: debug, Runner: tools.NewRunner(cwd)}
-	rl, err := readline.NewEx(&readline.Config{Prompt: "\033[31mdur>\033[0m ", HistoryLimit: 200})
+	s := &Session{Provider: provider.New(), Cfg: cfg, Model: model, Thinking: thinking, Debug: debug, Runner: tools.NewRunner(cwd)}
+	rl, err := readline.NewEx(&readline.Config{Prompt: s.inputPrompt(), HistoryLimit: 200})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "dur:", err)
 		return 1
@@ -38,6 +40,8 @@ func Run(debug bool) int {
 	fmt.Println("dur chat: ephemeral session; read-only tools enabled")
 	fmt.Println("type /help for commands, /exit to quit")
 	for {
+		fmt.Println(s.statusLine())
+		rl.SetPrompt(s.inputPrompt())
 		line, err := rl.Readline()
 		if err == readline.ErrInterrupt {
 			fmt.Println()
@@ -52,7 +56,7 @@ func Run(debug bool) int {
 			continue
 		}
 		if strings.HasPrefix(line, "/") {
-			if s.command(line) {
+			if s.command(line, rl) {
 				return 0
 			}
 			continue
@@ -64,7 +68,7 @@ func Run(debug bool) int {
 	}
 }
 
-func (s *Session) command(line string) bool {
+func (s *Session) command(line string, rl *readline.Instance) bool {
 	fields := strings.Fields(line)
 	switch fields[0] {
 	case "/exit", "/quit":
@@ -73,6 +77,8 @@ func (s *Session) command(line string) bool {
 		fmt.Println(helpText)
 	case "/pwd":
 		fmt.Println(s.Runner.Cwd)
+	case "/paste":
+		s.paste(rl)
 	case "/cd":
 		if len(fields) != 2 {
 			fmt.Fprintln(os.Stderr, "Usage: /cd <path>")
@@ -100,6 +106,10 @@ func (s *Session) command(line string) bool {
 			fmt.Println("tool verbosity:", fields[2])
 			break
 		}
+		if len(fields) == 2 && fields[1] == "history" {
+			s.printToolHistory()
+			break
+		}
 		fmt.Println(toolsText)
 	case "/tool":
 		if len(fields) != 2 {
@@ -122,7 +132,7 @@ func (s *Session) command(line string) bool {
 			fmt.Fprintln(os.Stderr, "dur: no such tool call")
 			break
 		}
-		fmt.Printf("\n\033[34mtool %d>\033[0m %s\n%s\n\n", rec.ID, rec.Trace, rec.Result)
+		printToolExpanded(rec)
 	case "/models":
 		s.printModels()
 	case "/model":
@@ -141,10 +151,30 @@ func (s *Session) command(line string) bool {
 		}
 		s.Model, _ = config.EffectiveModel(s.Cfg)
 		fmt.Println("dur: model set to", fields[1])
+	case "/thinking":
+		if len(fields) != 2 {
+			fmt.Fprintln(os.Stderr, "Usage: /thinking minimal|low|medium|high")
+			break
+		}
+		if !config.ValidThinking(fields[1]) {
+			fmt.Fprintln(os.Stderr, "dur: unsupported thinking effort:", fields[1])
+			break
+		}
+		s.Cfg.Thinking = fields[1]
+		if err := config.Save(s.Cfg); err != nil {
+			fmt.Fprintln(os.Stderr, "dur:", err)
+			break
+		}
+		s.Thinking, _ = config.EffectiveThinking(s.Cfg)
+		fmt.Println("dur: thinking set to", fields[1])
 	case "/config", "/status":
-		model, src := config.EffectiveModel(config.Load())
+		cfg := config.Load()
+		model, src := config.EffectiveModel(cfg)
+		thinking, thinkingSrc := config.EffectiveThinking(cfg)
 		s.Model = model
+		s.Thinking = thinking
 		fmt.Println("model:", model, "("+src+")")
+		fmt.Println("thinking:", thinking, "("+thinkingSrc+")")
 		fmt.Println("debug:", onoff(s.Debug))
 		fmt.Println("tool cwd:", s.Runner.Cwd)
 		fmt.Println("tool verbosity:", onoff(s.Runner.Verbose))
@@ -166,7 +196,7 @@ func (s *Session) command(line string) bool {
 func (s *Session) turn() error {
 	toolCalls := 0
 	for round := 0; round < 12; round++ {
-		req := provider.Request{Model: s.Model, Instructions: provider.ChatPrompt, Input: s.History, Tools: []provider.ToolSchema{provider.ToolDefinition()}}
+		req := provider.Request{Model: s.Model, Instructions: provider.ChatPrompt, Input: s.History, Reasoning: provider.Reasoning(s.Thinking), Tools: []provider.ToolSchema{provider.ToolDefinition()}}
 		if s.Debug {
 			debugRequest(req)
 		}
@@ -200,13 +230,9 @@ func (s *Session) turn() error {
 			}
 			_ = json.Unmarshal([]byte(call.Arguments), &args)
 			rec := s.Runner.Run(args.Cmd, args.Args)
-			label := fmt.Sprintf("[tool %d]", rec.ID)
-			if rec.Denied {
-				label = fmt.Sprintf("[tool %d denied]", rec.ID)
-			}
-			fmt.Fprintf(os.Stderr, "\033[34m%s %s\033[0m\n", label, rec.Trace)
+			printToolCollapsed(rec)
 			if s.Runner.Verbose {
-				fmt.Printf("\n\033[34mtool %d>\033[0m %s\n%s\n\n", rec.ID, rec.Trace, rec.Result)
+				printToolExpanded(rec)
 			}
 			s.History = append(s.History, map[string]any{"type": "function_call", "call_id": call.CallID, "name": call.Name, "arguments": call.Arguments})
 			s.History = append(s.History, map[string]any{"type": "function_call_output", "call_id": call.CallID, "output": rec.Result})
@@ -218,7 +244,7 @@ func (s *Session) turn() error {
 	}
 	s.History = append(s.History, map[string]any{"role": "user", "content": "Tool-call limit reached. Do not request more tools. Summarize findings from tool results already provided."})
 	printedAgent := false
-	res, err := s.Provider.Stream(context.Background(), provider.Request{Model: s.Model, Instructions: provider.ChatPrompt, Input: s.History}, func(delta string) {
+	res, err := s.Provider.Stream(context.Background(), provider.Request{Model: s.Model, Instructions: provider.ChatPrompt, Input: s.History, Reasoning: provider.Reasoning(s.Thinking)}, func(delta string) {
 		if !printedAgent {
 			fmt.Print("\n\033[32magent>\033[0m ")
 			printedAgent = true
@@ -236,6 +262,39 @@ func (s *Session) turn() error {
 	return nil
 }
 
+func (s *Session) paste(rl *readline.Instance) {
+	fmt.Println("paste mode: paste text, then enter a line containing only .")
+	oldPrompt := s.inputPrompt()
+	defer rl.SetPrompt(oldPrompt)
+	var b strings.Builder
+	for {
+		rl.SetPrompt("\033[2mpaste>\033[0m ")
+		line, err := rl.Readline()
+		if err == readline.ErrInterrupt {
+			fmt.Println("paste cancelled")
+			return
+		}
+		if err != nil {
+			fmt.Println()
+			return
+		}
+		if strings.TrimSpace(line) == "." {
+			break
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	text := strings.TrimRight(b.String(), "\n")
+	if strings.TrimSpace(text) == "" {
+		fmt.Println("paste cancelled: no content")
+		return
+	}
+	s.History = append(s.History, map[string]any{"role": "user", "content": text})
+	if err := s.turn(); err != nil {
+		fmt.Fprintln(os.Stderr, "dur:", err)
+	}
+}
+
 func (s *Session) printModels() {
 	models, _ := s.Provider.Models(context.Background())
 	for _, m := range models {
@@ -245,6 +304,126 @@ func (s *Session) printModels() {
 		}
 		fmt.Println(mark, m)
 	}
+}
+
+func (s *Session) printToolHistory() {
+	if len(s.Runner.Records) == 0 {
+		fmt.Println("no tool calls yet")
+		return
+	}
+	for _, rec := range s.Runner.Records {
+		fmt.Println(toolLine(rec, false))
+	}
+}
+
+func printToolCollapsed(rec tools.Record) {
+	fmt.Println(toolLine(rec, false))
+}
+
+func printToolExpanded(rec tools.Record) {
+	fmt.Println()
+	fmt.Println(toolLine(rec, true))
+	fmt.Println(renderToolResult(rec.Result))
+	fmt.Println()
+}
+
+func toolLine(rec tools.Record, expanded bool) string {
+	glyph := "▸"
+	status := "✓"
+	if expanded {
+		glyph = "▾"
+	}
+	if rec.Denied {
+		status = "✕"
+	}
+	return fmt.Sprintf("\033[34mtool %d %s %s %s\033[2m %s\033[0m", rec.ID, status, glyph, rec.Trace, rec.Elapsed.Round(10_000_000))
+}
+
+func renderToolResult(result string) string {
+	parts := parseToolResult(result)
+	if len(parts) == 0 {
+		return result
+	}
+	var b strings.Builder
+	if code := parts["exit_code"]; code != "" {
+		b.WriteString("exit ")
+		b.WriteString(code)
+		b.WriteString("\n")
+	}
+	if stdout := parts["stdout"]; stdout != "" {
+		b.WriteString("\n\033[2mstdout\n──────\033[0m\n")
+		b.WriteString(strings.TrimRight(stdout, "\n"))
+		b.WriteString("\n")
+	}
+	if stderr := parts["stderr"]; stderr != "" {
+		b.WriteString("\n\033[2mstderr\n──────\033[0m\n")
+		b.WriteString(strings.TrimRight(stderr, "\n"))
+		b.WriteString("\n")
+	}
+	out := strings.TrimRight(b.String(), "\n")
+	if out == "" {
+		return result
+	}
+	return out
+}
+
+func parseToolResult(result string) map[string]string {
+	sections := map[string]string{}
+	lines := strings.Split(result, "\n")
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		if strings.HasPrefix(line, "exit_code: ") {
+			sections["exit_code"] = strings.TrimSpace(strings.TrimPrefix(line, "exit_code: "))
+			continue
+		}
+		if line == "stdout:" || line == "stderr:" {
+			key := strings.TrimSuffix(line, ":")
+			start := i + 1
+			j := start
+			for j < len(lines) && lines[j] != "stdout:" && lines[j] != "stderr:" {
+				j++
+			}
+			sections[key] = strings.Join(lines[start:j], "\n")
+			i = j - 1
+		}
+	}
+	return sections
+}
+
+func (s *Session) statusLine() string {
+	host, _ := os.Hostname()
+	if host == "" {
+		host = "host"
+	}
+	if dot := strings.IndexByte(host, '.'); dot > 0 {
+		host = host[:dot]
+	}
+	cwd := shortPath(s.Runner.Cwd)
+	return fmt.Sprintf("\033[2m%s:%s | %s | thinking:%s | tools:on | verbose:%s\033[0m", host, cwd, s.Model, s.Thinking, onoff(s.Runner.Verbose))
+}
+
+func (s *Session) inputPrompt() string {
+	name := os.Getenv("USER")
+	if name == "" {
+		name = os.Getenv("LOGNAME")
+	}
+	if name == "" {
+		name = "you"
+	}
+	return fmt.Sprintf("\033[31m%s>\033[0m ", name)
+}
+
+func shortPath(path string) string {
+	home, err := os.UserHomeDir()
+	if err == nil && home != "" {
+		if path == home {
+			return "~"
+		}
+		if strings.HasPrefix(path, home+string(os.PathSeparator)) {
+			return "~" + strings.TrimPrefix(path, home)
+		}
+	}
+	return path
 }
 
 func debugRequest(req provider.Request) {
@@ -274,8 +453,11 @@ const helpText = `dur chat commands:
   /status
   /models
   /model <id>
+  /thinking minimal|low|medium|high
   /debug on|off
+  /paste
   /tools
+  /tools history
   /tools verbose on|off
   /tool N
   /tool last

@@ -11,6 +11,8 @@
 ```sh
 dur                         # ephemeral chat
 dur [--debug] <question>     # one-shot question
+dur --tools on [--tool-max-calls N] <question>
+                            # one-shot question with read-only tools
 command | dur [question]     # one-shot with stdin context
 dur --help|-h|help           # usage
 dur --version                # version
@@ -26,8 +28,11 @@ No top-level config/model/status subcommands in the Go UX. Those belong inside c
 /status
 /models
 /model <id>
+/thinking minimal|low|medium|high
 /debug on|off
+/paste
 /tools
+/tools history
 /tools verbose on|off
 /tool N
 /tool last
@@ -38,6 +43,12 @@ No top-level config/model/status subcommands in the Go UX. Those belong inside c
 ```
 
 Chat is ephemeral. Conversation history, readline history, and tool results are memory-only.
+
+## Tool-enabled one-shot / cron
+
+`dur --tools on <question>` runs the same read-only diagnostic tool loop in non-interactive one-shot mode. It is intended for cron/automation: final report goes to stdout, compact tool traces go to stderr, and failures exit non-zero so wrapper scripts can always post success or failure notifications.
+
+Options use space-separated values rather than `--name=value`. `--tool-max-calls N` caps tool usage and is included in the prompt so the model can budget and prioritize high-signal diagnostics.
 
 ## Clipboard
 

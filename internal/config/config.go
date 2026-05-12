@@ -7,9 +7,11 @@ import (
 )
 
 const DefaultModel = "gpt-5.4-mini"
+const DefaultThinking = "medium"
 
 type Config struct {
-	Model string `json:"model"`
+	Model    string `json:"model"`
+	Thinking string `json:"thinking"`
 }
 
 func Path() string {
@@ -63,6 +65,25 @@ func EffectiveModel(cfg Config) (model, source string) {
 		return cfg.Model, "config"
 	}
 	return DefaultModel, "default"
+}
+
+func EffectiveThinking(cfg Config) (thinking, source string) {
+	if env := os.Getenv("AIDUR_THINKING"); env != "" {
+		return env, "AIDUR_THINKING"
+	}
+	if cfg.Thinking != "" {
+		return cfg.Thinking, "config"
+	}
+	return DefaultThinking, "default"
+}
+
+func ValidThinking(value string) bool {
+	switch value {
+	case "minimal", "low", "medium", "high":
+		return true
+	default:
+		return false
+	}
 }
 
 func expandHome(path string) string {

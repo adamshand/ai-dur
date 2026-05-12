@@ -28,10 +28,11 @@ var Allowed = map[string]bool{
 var TrustedDirs = []string{"/bin", "/usr/bin", "/usr/local/bin", "/sbin", "/usr/sbin", "/opt/homebrew/bin", "/opt/homebrew/sbin"}
 
 type Record struct {
-	ID     int
-	Trace  string
-	Result string
-	Denied bool
+	ID      int
+	Trace   string
+	Result  string
+	Denied  bool
+	Elapsed time.Duration
 }
 
 type Runner struct {
@@ -45,8 +46,9 @@ func NewRunner(cwd string) *Runner { return &Runner{Cwd: cwd, NextID: 1} }
 
 func (r *Runner) Run(cmd string, args []string) Record {
 	trace := strings.Join(append([]string{cmd}, args...), " ")
+	start := time.Now()
 	result := RunReadOnly(r.Cwd, cmd, args)
-	rec := Record{ID: r.NextID, Trace: trace, Result: result, Denied: strings.Contains(result, "\nstderr:\ndenied:")}
+	rec := Record{ID: r.NextID, Trace: trace, Result: result, Denied: strings.Contains(result, "\nstderr:\ndenied:"), Elapsed: time.Since(start)}
 	r.NextID++
 	r.Records = append(r.Records, rec)
 	return rec

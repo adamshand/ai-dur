@@ -33,11 +33,23 @@ type Client struct {
 }
 
 type Request struct {
-	Model        string       `json:"model"`
-	Instructions string       `json:"instructions"`
-	Input        any          `json:"input"`
-	Tools        []ToolSchema `json:"tools,omitempty"`
-	Stream       bool         `json:"stream,omitempty"`
+	Model        string         `json:"model"`
+	Instructions string         `json:"instructions"`
+	Input        any            `json:"input"`
+	Reasoning    *ReasoningSpec `json:"reasoning,omitempty"`
+	Tools        []ToolSchema   `json:"tools,omitempty"`
+	Stream       bool           `json:"stream,omitempty"`
+}
+
+type ReasoningSpec struct {
+	Effort string `json:"effort"`
+}
+
+func Reasoning(effort string) *ReasoningSpec {
+	if effort == "" {
+		return nil
+	}
+	return &ReasoningSpec{Effort: effort}
 }
 
 type ToolSchema struct {
