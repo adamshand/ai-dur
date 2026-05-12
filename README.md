@@ -4,6 +4,10 @@
 
 AI-dur (`dur`) is a small terminal assistant for macOS and Linux. It can answer one-shot questions, start an ephemeral chat, and optionally use a bounded set of read-only diagnostic tools while chatting.
 
+I spend a lot of time debugging servers, sometimes quite old ones with legacy systems hand rolled configuration.  AI assistance is very valuable on these servers but the risk of an agent making an unnoticed change is unnacceptable.  AI-dur provides a set of read only tools to an agent to help you explore and diagnose problems.
+
+AI-dur is a single binary with no external dependencies.  Just copy it where ever you need it, set and environment variable, and you're ready to go.
+
 ## Install
 
 Grab Darwin arm64 or Linux amd64 binaries from the releases page or build from source:
