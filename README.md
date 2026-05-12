@@ -1,3 +1,5 @@
+<img width="512" alt="aidur propaganda" src="https://github.com/user-attachments/assets/c1c07b69-5a41-481b-b839-ce7bb1d0f0bf" />
+
 # AI-dur
 
 AI-dur (`dur`) is a small terminal assistant for macOS and Linux. It can answer one-shot questions, start an ephemeral chat, and optionally use a bounded set of read-only diagnostic tools while chatting.
