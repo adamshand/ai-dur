@@ -43,19 +43,20 @@ const (
 var deltaSpinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 type Session struct {
-	Provider    provider.Client
-	Cfg         config.Config
-	Model       string
-	ModelSource string
-	Thinking    string
-	AgentName   string
-	Debug       bool
-	Runner      *tools.Runner
-	History     []map[string]any
-	UI          *TerminalUI
-	turnMu      sync.Mutex
-	turnID      uint64
-	turnCancel  context.CancelFunc
+	Provider        provider.Client
+	Cfg             config.Config
+	Model           string
+	ModelSource     string
+	Thinking        string
+	AgentName       string
+	AgentNameSource string
+	Debug           bool
+	Runner          *tools.Runner
+	History         []map[string]any
+	UI              *TerminalUI
+	turnMu          sync.Mutex
+	turnID          uint64
+	turnCancel      context.CancelFunc
 }
 
 type transcriptItem struct {
@@ -92,9 +93,9 @@ func Run(debug bool, modelOverride string, stdinContext string) int {
 		modelSource = "--model"
 	}
 	thinking, _ := config.EffectiveThinking(cfg)
-	agentName, _ := config.EffectiveAgentName(cfg)
+	agentName, agentNameSource := config.EffectiveAgentName(cfg)
 	cwd, _ := os.Getwd()
-	s := &Session{Provider: provider.New(), Cfg: cfg, Model: model, ModelSource: modelSource, Thinking: thinking, AgentName: agentName, Debug: debug, Runner: tools.NewRunner(cwd)}
+	s := &Session{Provider: provider.New(), Cfg: cfg, Model: model, ModelSource: modelSource, Thinking: thinking, AgentName: agentName, AgentNameSource: agentNameSource, Debug: debug, Runner: tools.NewRunner(cwd)}
 	ui := &TerminalUI{agentName: agentName}
 	s.UI = ui
 	ui.statusFunc = s.statusLine
@@ -1252,7 +1253,7 @@ func (s *Session) command(line string) bool {
 			s.UI.Append("dur", err.Error())
 			break
 		}
-		s.AgentName, _ = config.EffectiveAgentName(s.Cfg)
+		s.AgentName, s.AgentNameSource = config.EffectiveAgentName(s.Cfg)
 		s.UI.SetAgentName(s.AgentName)
 		s.UI.Append("dur", "agent name set to "+s.AgentName)
 	case "/model":
@@ -1296,6 +1297,7 @@ func (s *Session) command(line string) bool {
 		s.Model = model
 		s.Thinking = thinking
 		s.AgentName = agentName
+		s.AgentNameSource = agentNameSrc
 		s.UI.SetAgentName(agentName)
 		s.UI.Append("dur", fmt.Sprintf("model: %s (%s)\nthinking: %s (%s)\nagent name: %s (%s)\ndebug: %s\ntool cwd: %s\ntool verbosity: %s\ntool calls: %d\nconfig: %s", model, src, thinking, thinkingSrc, agentName, agentNameSrc, onoff(s.Debug), s.Runner.Cwd, onoff(s.Runner.Verbose), len(s.Runner.Records), config.Path()))
 	case "/debug":
@@ -1461,7 +1463,7 @@ func (s *Session) turnWithContext(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		req := provider.Request{Model: s.Model, Instructions: provider.ChatPrompt, Input: s.History, Reasoning: provider.Reasoning(s.Thinking), Tools: []provider.ToolSchema{provider.ToolDefinition()}}
+		req := provider.Request{Model: s.Model, Instructions: s.chatPrompt(), Input: s.History, Reasoning: provider.Reasoning(s.Thinking), Tools: []provider.ToolSchema{provider.ToolDefinition()}}
 		if s.Debug {
 			s.UI.Append("dur", debugRequestString(req))
 		}
@@ -1526,7 +1528,7 @@ func (s *Session) turnWithContext(ctx context.Context) error {
 	s.History = append(s.History, map[string]any{"role": "user", "content": "Tool-call limit reached. Do not request more tools. Summarize findings from tool results already provided."})
 	var agent strings.Builder
 	s.UI.StartDelta("agent")
-	res, err := s.Provider.Stream(ctx, provider.Request{Model: s.Model, Instructions: provider.ChatPrompt, Input: s.History, Reasoning: provider.Reasoning(s.Thinking)}, func(delta string) {
+	res, err := s.Provider.Stream(ctx, provider.Request{Model: s.Model, Instructions: s.chatPrompt(), Input: s.History, Reasoning: provider.Reasoning(s.Thinking)}, func(delta string) {
 		agent.WriteString(delta)
 		s.UI.AppendDelta("agent", delta)
 	})
@@ -1550,6 +1552,13 @@ func (s *Session) turnWithContext(ctx context.Context) error {
 		s.History = append(s.History, map[string]any{"role": "assistant", "content": res.Answer})
 	}
 	return nil
+}
+
+func (s *Session) chatPrompt() string {
+	if s.AgentNameSource == "default" {
+		return provider.ChatPrompt
+	}
+	return provider.ChatPromptWithAgentName(s.AgentName)
 }
 
 func (s *Session) printModels() {
@@ -1754,7 +1763,10 @@ const helpText = `/cd <path>                         change command working dire
 /tool last                         show most recent tool call with output
 /tools                             list available tools (read-only)
 /tools history                     list tool call history
-/tools verbose on|off              toggle expanded tool output`
+/tools verbose on|off              toggle expanded tool output
+
+Additional documentation and examples are available at:
+  https://github.com/adamshand/ai-dur`
 
 const toolsText = `read-only tools:
   pwd ls stat file wc head tail cat rg grep

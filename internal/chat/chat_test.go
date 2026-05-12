@@ -1,6 +1,11 @@
 package chat
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/adamshand/aidur/internal/provider"
+)
 
 func TestRenderInputEmptyCursorAfterPrompt(t *testing.T) {
 	lines, row, col := renderInput("adam", "", 0, 80)
@@ -41,6 +46,23 @@ func TestRenderMessageUsesConfiguredAgentName(t *testing.T) {
 	}
 	if got := stripANSI(lines[0]); got != "edda> hello" {
 		t.Fatalf("rendered agent line = %q, want %q", got, "edda> hello")
+	}
+}
+
+func TestChatPromptIncludesConfiguredAgentName(t *testing.T) {
+	agentName := "edda"
+	s := &Session{AgentName: agentName, AgentNameSource: "config"}
+	got := s.chatPrompt()
+	want := "Your name in this chat is " + agentName + "."
+	if !strings.Contains(got, want) {
+		t.Fatalf("chatPrompt missing agent name note: %q", got)
+	}
+}
+
+func TestChatPromptOmitsDefaultAgentName(t *testing.T) {
+	s := &Session{AgentName: "aidur", AgentNameSource: "default"}
+	if got := s.chatPrompt(); got != provider.ChatPrompt {
+		t.Fatalf("chatPrompt default = %q, want base chat prompt", got)
 	}
 }
 

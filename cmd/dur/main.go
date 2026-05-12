@@ -269,5 +269,8 @@ func usage() {
   command | dur                Start chat with stdin context
   command | dur <question>     Ask one-shot question with stdin context
   dur --help                   Show help
-  dur --version                Show version`)
+  dur --version                Show version
+
+Additional documentation and examples are available at:
+  https://github.com/adamshand/ai-dur`)
 }

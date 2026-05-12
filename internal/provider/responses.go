@@ -26,6 +26,14 @@ const ChatPrompt = SystemPrompt + "\nIn dur chat, you may inspect the machine us
 	"Unavailable commands will be denied; do not repeatedly probe obviously unavailable commands. " +
 	"Never request mutating, interactive, or long-running commands."
 
+func ChatPromptWithAgentName(agentName string) string {
+	agentName = strings.TrimSpace(agentName)
+	if agentName == "" {
+		return ChatPrompt
+	}
+	return ChatPrompt + "\nYour name in this chat is " + agentName + "."
+}
+
 type Client struct {
 	HTTPClient *http.Client
 	APIKey     string

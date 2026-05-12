@@ -5,6 +5,19 @@ import (
 	"testing"
 )
 
+func TestChatPromptWithAgentNameUsesProvidedName(t *testing.T) {
+	for _, name := range []string{"edda", "marvin"} {
+		got := ChatPromptWithAgentName(name)
+		want := "Your name in this chat is " + name + "."
+		if !strings.Contains(got, want) {
+			t.Fatalf("ChatPromptWithAgentName(%q) missing agent name note: %q", name, got)
+		}
+	}
+	if got := ChatPromptWithAgentName("   "); got != ChatPrompt {
+		t.Fatalf("blank agent name changed prompt")
+	}
+}
+
 func TestReasoningOffDisablesReasoningSpec(t *testing.T) {
 	if Reasoning("off") != nil {
 		t.Fatalf("Reasoning(off) != nil")
