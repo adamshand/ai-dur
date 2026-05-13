@@ -115,8 +115,34 @@ func TestDmesgHostnameIPValidators(t *testing.T) {
 	if got := RunReadOnly(t.TempDir(), "hostname", []string{"new-host"}); !strings.Contains(got, "hostname arguments are not allowed") {
 		t.Fatal(got)
 	}
-	if got := RunReadOnly(t.TempDir(), "ip", []string{"link", "set", "eth0", "down"}); !strings.Contains(got, "mutating ip subcommands are not allowed") {
+	if got := RunReadOnly(t.TempDir(), "ip", []string{"link", "set", "eth0", "down"}); !strings.Contains(got, "ip link subcommand not allowed: set") {
 		t.Fatal(got)
+	}
+}
+
+func TestIPValidatorAllowsOnlyReadOnlySubcommands(t *testing.T) {
+	allowed := [][]string{
+		{"addr"},
+		{"addr", "show"},
+		{"route", "get", "192.0.2.1"},
+		{"netns", "pids", "example"},
+	}
+	for _, args := range allowed {
+		if _, err := validateIP(args); err != nil {
+			t.Fatalf("validateIP(%v) denied read-only command: %v", args, err)
+		}
+	}
+
+	denied := [][]string{
+		{"route", "append", "default", "via", "192.0.2.1"},
+		{"netns", "attach", "example", "1234"},
+		{"link", "set", "eth0", "down"},
+		{"addr", "add", "192.0.2.2/24", "dev", "eth0"},
+	}
+	for _, args := range denied {
+		if _, err := validateIP(args); err == nil {
+			t.Fatalf("validateIP(%v) allowed mutating command", args)
+		}
 	}
 }
 
@@ -132,7 +158,22 @@ func TestSensitiveFileDeniedForContentReaders(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(ssh, "id_rsa.pub"), []byte("public"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("TOKEN=secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := RunReadOnly(dir, "cat", []string{".env"}); !strings.Contains(got, "sensitive file path is not allowed") {
+		t.Fatal(got)
+	}
 	if got := RunReadOnly(dir, "cat", []string{".ssh/id_rsa"}); !strings.Contains(got, "sensitive file path is not allowed") {
+		t.Fatal(got)
+	}
+	if got := RunReadOnly(dir, "cat", []string{"-n", ".ssh/id_rsa"}); !strings.Contains(got, "sensitive file path is not allowed") {
+		t.Fatal(got)
+	}
+	if got := RunReadOnly(dir, "grep", []string{"-n", "secret", ".ssh/id_rsa"}); !strings.Contains(got, "sensitive file path is not allowed") {
+		t.Fatal(got)
+	}
+	if got := RunReadOnly(dir, "rg", []string{"-n", "secret", ".ssh/id_rsa"}); !strings.Contains(got, "sensitive file path is not allowed") {
 		t.Fatal(got)
 	}
 	if got := RunReadOnly(dir, "cat", []string{".ssh/id_rsa.pub"}); !strings.Contains(got, "public") {

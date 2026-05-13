@@ -133,15 +133,17 @@ func resolve(cmd string) (string, error) {
 
 func validate(cmd string, args []string, cwd string) ([]string, error) {
 	switch cmd {
-	case "cat", "head":
-		return args, validatePaths(args, cwd, true, 0)
+	case "cat":
+		return args, validatePaths(args, cwd, true, 0, pathValueOptions(cmd))
+	case "head":
+		return args, validatePaths(args, cwd, true, 0, pathValueOptions(cmd))
 	case "tail":
 		if hasFlag(args, "-f") || hasLong(args, "--follow") {
 			return nil, errors.New("tail follow mode is not allowed")
 		}
-		return args, validatePaths(args, cwd, true, 0)
+		return args, validatePaths(args, cwd, true, 0, pathValueOptions(cmd))
 	case "stat", "file", "wc", "ls":
-		return args, validatePaths(args, cwd, false, 0)
+		return args, validatePaths(args, cwd, false, 0, pathValueOptions(cmd))
 	case "rg":
 		for _, a := range args {
 			if a == "--pre" || strings.HasPrefix(a, "--pre=") || a == "--pre-glob" || strings.HasPrefix(a, "--pre-glob=") {
@@ -151,14 +153,14 @@ func validate(cmd string, args []string, cwd string) ([]string, error) {
 				return nil, errors.New("rg options that include hidden/ignored files are not allowed")
 			}
 		}
-		return append([]string{"--no-config"}, args...), validatePaths(args, cwd, true, 1)
+		return append([]string{"--no-config"}, args...), validatePaths(args, cwd, true, 1, pathValueOptions(cmd))
 	case "grep":
 		for _, a := range args {
 			if a == "-r" || a == "-R" || a == "--recursive" || a == "--dereference-recursive" || (strings.HasPrefix(a, "-") && !strings.HasPrefix(a, "--") && (strings.Contains(a, "r") || strings.Contains(a, "R"))) {
 				return nil, errors.New("recursive grep is not allowed; use rg's safer defaults")
 			}
 		}
-		return args, validatePaths(args, cwd, true, 1)
+		return args, validatePaths(args, cwd, true, 1, pathValueOptions(cmd))
 	case "journalctl":
 		return validateJournalctl(args)
 	case "systemctl":
@@ -290,15 +292,29 @@ func validateIP(args []string) ([]string, error) {
 	if i >= len(args) {
 		return args, nil
 	}
-	if !in(args[i], "addr", "address", "route", "rule", "link", "neigh", "neighbour", "netns", "maddr") {
-		return nil, fmt.Errorf("ip object not allowed: %s", args[i])
+	object := args[i]
+	if !in(object, "addr", "address", "route", "rule", "link", "neigh", "neighbour", "netns", "maddr") {
+		return nil, fmt.Errorf("ip object not allowed: %s", object)
 	}
-	for _, a := range args[i+1:] {
-		if in(a, "add", "del", "delete", "replace", "change", "set", "flush", "save", "restore", "exec", "monitor") {
-			return nil, errors.New("mutating ip subcommands are not allowed")
-		}
+	if i+1 >= len(args) {
+		return args, nil
+	}
+	operation := args[i+1]
+	if !ipReadOnlyOperation(object, operation) {
+		return nil, fmt.Errorf("ip %s subcommand not allowed: %s", object, operation)
 	}
 	return args, nil
+}
+
+func ipReadOnlyOperation(object, operation string) bool {
+	switch object {
+	case "route":
+		return in(operation, "show", "list", "get")
+	case "netns":
+		return in(operation, "list", "show", "identify", "pids")
+	default:
+		return in(operation, "show", "list")
+	}
 }
 
 func safeFind(cwd string, args []string) string {
@@ -415,18 +431,41 @@ func parseFind(cwd string, args []string) ([]string, []string, []string, string,
 	return roots, names, paths, typ, maxd, mind, nil
 }
 
-func validatePaths(args []string, cwd string, denySensitive bool, skip int) error {
+func pathValueOptions(cmd string) map[string]bool {
+	switch cmd {
+	case "head", "tail":
+		return map[string]bool{"-n": true, "--lines": true, "-c": true, "--bytes": true}
+	case "grep":
+		return map[string]bool{"-m": true, "--max-count": true, "-A": true, "-B": true, "-C": true, "--after-context": true, "--before-context": true, "--context": true}
+	case "rg":
+		return map[string]bool{"-m": true, "--max-count": true, "-A": true, "-B": true, "-C": true, "--after-context": true, "--before-context": true, "--context": true, "--glob": true, "-g": true, "--max-depth": true}
+	default:
+		return nil
+	}
+}
+
+func validatePaths(args []string, cwd string, denySensitive bool, skip int, valueOpts map[string]bool) error {
 	skipped := 0
-	valueOpts := map[string]bool{"-n": true, "--lines": true, "-c": true, "--bytes": true, "-m": true, "--max-count": true, "-A": true, "-B": true, "-C": true, "--after-context": true, "--before-context": true, "--context": true, "--glob": true, "-g": true, "--max-depth": true}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if a == "--" {
 			continue
 		}
 		if strings.HasPrefix(a, "--") && strings.Contains(a, "=") {
+			opt, value, _ := strings.Cut(a, "=")
+			if valueOpts[opt] {
+				if err := rejectSensitivePath(cwd, value, denySensitive); err != nil {
+					return err
+				}
+			}
 			continue
 		}
 		if valueOpts[a] {
+			if i+1 < len(args) {
+				if err := rejectSensitivePath(cwd, args[i+1], denySensitive); err != nil {
+					return err
+				}
+			}
 			i++
 			continue
 		}
@@ -437,9 +476,16 @@ func validatePaths(args []string, cwd string, denySensitive bool, skip int) erro
 			skipped++
 			continue
 		}
-		if denySensitive && looksPath(a) && sensitive(resolvePath(cwd, a)) {
-			return fmt.Errorf("sensitive file path is not allowed: %s", a)
+		if err := rejectSensitivePath(cwd, a, denySensitive); err != nil {
+			return err
 		}
+	}
+	return nil
+}
+
+func rejectSensitivePath(cwd, arg string, denySensitive bool) error {
+	if denySensitive && sensitive(resolvePath(cwd, arg)) {
+		return fmt.Errorf("sensitive file path is not allowed: %s", arg)
 	}
 	return nil
 }
@@ -472,9 +518,6 @@ func resolvePath(cwd, p string) string {
 		return r
 	}
 	return filepath.Clean(q)
-}
-func looksPath(s string) bool {
-	return s == "." || s == ".." || strings.Contains(s, "/") || strings.HasPrefix(s, "~")
 }
 func shellSyntax(args []string) bool {
 	toks := map[string]bool{"|": true, "||": true, "&": true, "&&": true, "<": true, ">": true, ">>": true, "2>": true, "2>>": true, "`": true}

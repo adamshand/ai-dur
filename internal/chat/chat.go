@@ -38,6 +38,9 @@ const (
 
 	footerTopPaddingRows = 1
 	deltaSpinnerEvery    = 120 * time.Millisecond
+
+	enableTerminalInputModesSequence  = "\033[?2004h\033[>5u\033[>4;2m"
+	disableTerminalInputModesSequence = "\033[?2004l\033[<u\033[>4;0m\033[?25h"
 )
 
 var deltaSpinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -218,14 +221,13 @@ func enableTerminalInputModes() {
 	// protocol and xterm modifyOtherKeys let terminals report Shift+Enter as a
 	// distinct sequence instead of collapsing it to plain Enter.
 	//
-	// Kitty flags 1|2|4 match pi: disambiguate escapes, report event types,
-	// and report alternate keys. Flag 1 alone is not enough for Shift+Enter in
-	// some terminals.
-	fmt.Print("\033[?2004h\033[?u\033[>7u\033[>4;2m")
+	// Kitty flags 1|4 disambiguate escape codes and report alternate keys. Avoid
+	// flag 2 so key-release events are not leaked to the shell after Ctrl-Z.
+	fmt.Print(enableTerminalInputModesSequence)
 }
 
 func disableTerminalInputModes() {
-	fmt.Print("\033[?2004l\033[<u\033[>4;0m\033[?25h")
+	fmt.Print(disableTerminalInputModesSequence)
 }
 
 func (ui *TerminalUI) finish() {
@@ -260,29 +262,9 @@ func (ui *TerminalUI) handleData(data string) {
 			ui.cancel()
 			return
 		}
-		if strings.HasPrefix(data, "\x1b[D") {
-			ui.moveLeft()
-			data = data[3:]
-			continue
-		}
-		if strings.HasPrefix(data, "\x1b[C") {
-			ui.moveRight()
-			data = data[3:]
-			continue
-		}
-		if strings.HasPrefix(data, "\x1b[H") || strings.HasPrefix(data, "\x1b[1~") {
-			ui.moveStart()
-			data = dropEscape(data)
-			continue
-		}
-		if strings.HasPrefix(data, "\x1b[F") || strings.HasPrefix(data, "\x1b[4~") {
-			ui.moveEnd()
-			data = dropEscape(data)
-			continue
-		}
-		if strings.HasPrefix(data, "\x1b[3~") {
-			ui.deleteForward()
-			data = data[4:]
+		if n, key, ok := navigationKeySequence(data); ok {
+			ui.handleNavigationKey(key)
+			data = data[n:]
 			continue
 		}
 		if n, ok := modifiedEnterSequenceLen(data); ok {
@@ -356,10 +338,98 @@ func modifiedEnterSequenceLen(s string) (int, bool) {
 	return 0, false
 }
 
+func navigationKeySequence(s string) (int, string, bool) {
+	if len(s) >= 3 && strings.HasPrefix(s, "\x1bO") {
+		switch s[2] {
+		case 'C':
+			return 3, "right", true
+		case 'D':
+			return 3, "left", true
+		case 'H':
+			return 3, "home", true
+		case 'F':
+			return 3, "end", true
+		}
+	}
+	if !strings.HasPrefix(s, "\x1b[") {
+		return 0, "", false
+	}
+	for i := 2; i < len(s); i++ {
+		if s[i] < 0x40 || s[i] > 0x7e {
+			continue
+		}
+		switch s[i] {
+		case 'C':
+			return i + 1, "right", true
+		case 'D':
+			return i + 1, "left", true
+		case 'H':
+			return i + 1, "home", true
+		case 'F':
+			return i + 1, "end", true
+		case '~':
+			return tildeNavigationKey(s[2:i], i+1)
+		}
+		return 0, "", false
+	}
+	return 0, "", false
+}
+
+func tildeNavigationKey(body string, n int) (int, string, bool) {
+	if i := strings.IndexAny(body, ";:"); i >= 0 {
+		body = body[:i]
+	}
+	switch body {
+	case "1", "7":
+		return n, "home", true
+	case "4", "8":
+		return n, "end", true
+	case "3":
+		return n, "delete", true
+	}
+	return 0, "", false
+}
+
+func (ui *TerminalUI) handleNavigationKey(key string) {
+	switch key {
+	case "left":
+		ui.moveLeft()
+	case "right":
+		ui.moveRight()
+	case "home":
+		ui.moveStart()
+	case "end":
+		ui.moveEnd()
+	case "delete":
+		ui.deleteForward()
+	}
+}
+
+func (ui *TerminalUI) handleKittyFunctionalKey(code rune) bool {
+	switch code {
+	case 57417:
+		ui.moveLeft()
+	case 57418:
+		ui.moveRight()
+	case 57423:
+		ui.moveStart()
+	case 57424:
+		ui.moveEnd()
+	case 57426:
+		ui.deleteForward()
+	default:
+		return false
+	}
+	return true
+}
+
 func (ui *TerminalUI) handleTerminalKeySequence(s string) (int, bool) {
 	n, code, mod, ok := parseTerminalKeySequence(s)
 	if !ok {
 		return 0, false
+	}
+	if ui.handleKittyFunctionalKey(code) {
+		return n, true
 	}
 	if code == 27 {
 		ui.cancel()
@@ -477,16 +547,26 @@ func dropEscape(s string) string {
 }
 
 func (ui *TerminalUI) suspend() {
-	ui.restore()
+	ui.mu.Lock()
+	ui.clearLiveLocked()
+	fmt.Print(reset)
+	ui.mu.Unlock()
 	disableTerminalInputModes()
-	fmt.Print("\n")
+	ui.restore()
+	fmt.Print("\r\n")
+	flushTerminalOutput()
+
 	_ = syscall.Kill(syscall.Getpid(), syscall.SIGTSTP)
+
 	old, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err == nil {
 		ui.oldState = old
 	}
-	fmt.Print("\033[?25l")
 	enableTerminalInputModes()
+}
+
+func flushTerminalOutput() {
+	_ = os.Stdout.Sync()
 }
 
 func (ui *TerminalUI) insertText(text string) {

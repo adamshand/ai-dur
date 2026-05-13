@@ -66,6 +66,58 @@ func TestChatPromptOmitsDefaultAgentName(t *testing.T) {
 	}
 }
 
+func TestTerminalInputModesDoNotQueryOrReportKeyRelease(t *testing.T) {
+	if strings.Contains(enableTerminalInputModesSequence, "\x1b[?u") {
+		t.Fatalf("enableTerminalInputModesSequence queries terminal support; query responses can leak after suspend")
+	}
+	if strings.Contains(enableTerminalInputModesSequence, "\x1b[>7u") {
+		t.Fatalf("enableTerminalInputModesSequence enables key-release events")
+	}
+}
+
+func TestNavigationKeySequence(t *testing.T) {
+	cases := []struct {
+		seq string
+		key string
+	}{
+		{"\x1b[D", "left"},
+		{"\x1b[C", "right"},
+		{"\x1b[1;1D", "left"},
+		{"\x1b[1;5C", "right"},
+		{"\x1bOD", "left"},
+		{"\x1bOC", "right"},
+		{"\x1b[H", "home"},
+		{"\x1b[F", "end"},
+		{"\x1b[3~", "delete"},
+	}
+	for _, tc := range cases {
+		n, key, ok := navigationKeySequence(tc.seq + "rest")
+		if !ok || n != len(tc.seq) || key != tc.key {
+			t.Fatalf("navigationKeySequence(%q) = (%d, %q, %v), want (%d, %q, true)", tc.seq, n, key, ok, len(tc.seq), tc.key)
+		}
+	}
+}
+
+func TestHandleDataSupportsModifiedArrowKeys(t *testing.T) {
+	ui := &TerminalUI{}
+	ui.handleData("abc")
+	ui.handleData("\x1b[1;1D")
+	ui.handleData("X")
+	if ui.input != "abXc" {
+		t.Fatalf("input after modified left arrow = %q, want abXc", ui.input)
+	}
+}
+
+func TestHandleDataSupportsKittyFunctionalArrowKeys(t *testing.T) {
+	ui := &TerminalUI{}
+	ui.handleData("abc")
+	ui.handleData("\x1b[57417u")
+	ui.handleData("X")
+	if ui.input != "abXc" {
+		t.Fatalf("input after Kitty left arrow = %q, want abXc", ui.input)
+	}
+}
+
 func TestModifiedEnterSequenceLen(t *testing.T) {
 	cases := []string{
 		"\x1b[13;2u",
