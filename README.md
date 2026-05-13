@@ -45,7 +45,6 @@ Useful environment overrides:
 ```sh
 export AIDUR_MODEL="gpt-5.4-mini"
 export AIDUR_THINKING="medium"   # off, low, medium, high
-export AIDUR_AGENT_NAME="aidur"
 ```
 
 ## Usage
@@ -100,7 +99,6 @@ Inside chat:
 /help                              show help
 /model <id>                        set persistent model
 /models                            list available models
-/name <agent-name>                 set assistant prompt name
 /status                            show configuration
 /thinking off|low|medium|high      set reasoning effort
 /tools                             list available read-only tools

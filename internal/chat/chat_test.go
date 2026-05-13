@@ -3,8 +3,6 @@ package chat
 import (
 	"strings"
 	"testing"
-
-	"github.com/adamshand/aidur/internal/provider"
 )
 
 func TestRenderInputEmptyCursorAfterPrompt(t *testing.T) {
@@ -39,30 +37,13 @@ func TestRenderInputWideRuneCursorUsesDisplayWidth(t *testing.T) {
 	}
 }
 
-func TestRenderMessageUsesConfiguredAgentName(t *testing.T) {
-	lines := renderMessageWithAgentName("agent", "hello", 80, "edda")
+func TestRenderMessageUsesHostnameAgentPrompt(t *testing.T) {
+	lines := renderMessageWithAgentPrompt("agent", "hello", 80, "weka")
 	if len(lines) != 1 {
 		t.Fatalf("len(lines) = %d, want 1", len(lines))
 	}
-	if got := stripANSI(lines[0]); got != "edda> hello" {
-		t.Fatalf("rendered agent line = %q, want %q", got, "edda> hello")
-	}
-}
-
-func TestChatPromptIncludesConfiguredAgentName(t *testing.T) {
-	agentName := "edda"
-	s := &Session{AgentName: agentName, AgentNameSource: "config"}
-	got := s.chatPrompt()
-	want := "Your name in this chat is " + agentName + "."
-	if !strings.Contains(got, want) {
-		t.Fatalf("chatPrompt missing agent name note: %q", got)
-	}
-}
-
-func TestChatPromptOmitsDefaultAgentName(t *testing.T) {
-	s := &Session{AgentName: "aidur", AgentNameSource: "default"}
-	if got := s.chatPrompt(); got != provider.ChatPrompt {
-		t.Fatalf("chatPrompt default = %q, want base chat prompt", got)
+	if got := stripANSI(lines[0]); got != "weka> hello" {
+		t.Fatalf("rendered agent line = %q, want %q", got, "weka> hello")
 	}
 }
 
@@ -202,6 +183,15 @@ func TestTrimLiveLinesOneRowShowsIndicator(t *testing.T) {
 	got := trimLiveLines([]string{"one", "two"}, 1)
 	if len(got) != 1 || !strings.Contains(stripANSI(got[0]), "2 lines above") {
 		t.Fatalf("trimLiveLines one row = %#v, want indicator", got)
+	}
+}
+
+func TestShortHostRemovesDomain(t *testing.T) {
+	if got := shortHost("srv.example.com"); got != "srv" {
+		t.Fatalf("shortHost = %q, want srv", got)
+	}
+	if got := shortHost(""); got != "host" {
+		t.Fatalf("shortHost empty = %q, want host", got)
 	}
 }
 
