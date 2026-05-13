@@ -1,4 +1,4 @@
-<img width="100%"  alt="b634d5e1-10f3-4de5-9534-310ca5529641" src="https://github.com/user-attachments/assets/a6215996-02bf-4413-a1df-b3beba2e63e6" />
+<img width="100%" alt="image" src="https://github.com/user-attachments/assets/9bd3eb6f-4045-4a8a-925c-81f3ba6dab69" />
 
 # AI-dur
 
