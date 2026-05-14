@@ -89,6 +89,14 @@ List available models:
 dur --models
 ```
 
+Update to the latest GitHub release:
+
+```sh
+dur --update
+```
+
+`dur --update` downloads the matching release archive for your platform, verifies it against `checksums.txt`, and replaces the current binary location when writable. It is disabled for `dev` builds.
+
 Pipe stdin into a one-shot question:
 
 ```sh

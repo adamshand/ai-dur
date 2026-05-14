@@ -13,6 +13,7 @@ import (
 	"github.com/adamshand/aidur/internal/config"
 	"github.com/adamshand/aidur/internal/provider"
 	toolrunner "github.com/adamshand/aidur/internal/tools"
+	updater "github.com/adamshand/aidur/internal/update"
 	"golang.org/x/term"
 )
 
@@ -24,6 +25,7 @@ func run(argv []string) int {
 	debug := false
 	useTools := false
 	modelsFlag := false
+	updateFlag := false
 	modelOverride := ""
 	toolMaxCalls := 20
 	var args []string
@@ -34,6 +36,8 @@ func run(argv []string) int {
 			debug = true
 		case a == "--models":
 			modelsFlag = true
+		case a == "--update":
+			updateFlag = true
 		case a == "--model":
 			if i+1 >= len(argv) {
 				fmt.Fprintln(os.Stderr, "dur: --model requires a model id")
@@ -86,6 +90,13 @@ func run(argv []string) int {
 	if len(args) > 0 && args[0] == "--version" {
 		fmt.Println(Version)
 		return 0
+	}
+	if updateFlag {
+		if len(args) > 0 {
+			fmt.Fprintln(os.Stderr, "dur: --update does not take a question")
+			return 2
+		}
+		return updater.Run(context.Background(), updater.Options{CurrentVersion: Version, Out: os.Stdout, Err: os.Stderr})
 	}
 	if len(args) > 0 && args[0] == "auth" {
 		if len(args) != 1 {
@@ -313,6 +324,7 @@ func usage() {
   command | dur <question>     Ask one-shot question with stdin context
   dur --help                   Show help
   dur --version                Show version
+  dur --update                 Update dur from the latest GitHub release
 
 Additional documentation and examples are available at:
   https://github.com/adamshand/ai-dur`)
