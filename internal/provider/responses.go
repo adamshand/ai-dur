@@ -12,6 +12,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/adamshand/aidur/internal/config"
 )
 
 const DefaultBaseURL = "https://opencode.ai/zen"
@@ -77,9 +79,13 @@ func New() Client {
 	if base == "" {
 		base = DefaultBaseURL
 	}
+	apiKey := os.Getenv("OPENCODE_ZEN_API_KEY")
+	if apiKey == "" {
+		apiKey = config.Load().OpenCodeZenAPIKey
+	}
 	return Client{
 		HTTPClient: &http.Client{Timeout: Timeout()},
-		APIKey:     os.Getenv("OPENCODE_ZEN_API_KEY"),
+		APIKey:     apiKey,
 		BaseURL:    base,
 	}
 }
@@ -108,9 +114,17 @@ func (c Client) Stream(ctx context.Context, req Request, onText func(string)) (R
 	return c.do(ctx, req, onText)
 }
 
+func PromptWithInstructions(basePrompt, instructions string) string {
+	instructions = strings.TrimSpace(instructions)
+	if instructions == "" {
+		return basePrompt
+	}
+	return basePrompt + "\n\nAdditional user instructions:\n" + instructions
+}
+
 func (c Client) do(ctx context.Context, req Request, onText func(string)) (Response, error) {
 	if c.APIKey == "" {
-		return Response{}, errors.New("missing OPENCODE_ZEN_API_KEY")
+		return Response{}, errors.New("missing OPENCODE_ZEN_API_KEY or opencode_zen_api_key in config")
 	}
 	data, err := json.Marshal(req)
 	if err != nil {

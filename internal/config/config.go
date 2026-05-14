@@ -10,8 +10,10 @@ const DefaultModel = "gpt-5.4-mini"
 const DefaultThinking = "medium"
 
 type Config struct {
-	Model    string `json:"model"`
-	Thinking string `json:"thinking"`
+	Model             string `json:"model"`
+	Thinking          string `json:"thinking"`
+	Instructions      string `json:"instructions"`
+	OpenCodeZenAPIKey string `json:"opencode_zen_api_key"`
 }
 
 func Path() string {
@@ -42,7 +44,11 @@ func Load() Config {
 
 func Save(cfg Config) error {
 	path := Path()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")

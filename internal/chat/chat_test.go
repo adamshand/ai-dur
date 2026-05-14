@@ -24,8 +24,8 @@ func TestRenderInputWrappedBoundaryCursorStartsNextLine(t *testing.T) {
 	if row != 1 {
 		t.Fatalf("row = %d, want 1", row)
 	}
-	if col != len("adam> ") {
-		t.Fatalf("col = %d, want %d", col, len("adam> "))
+	if col != 0 {
+		t.Fatalf("col = %d, want 0", col)
 	}
 }
 
@@ -44,6 +44,50 @@ func TestRenderMessageUsesHostnameAgentPrompt(t *testing.T) {
 	}
 	if got := stripANSI(lines[0]); got != "weka> hello" {
 		t.Fatalf("rendered agent line = %q, want %q", got, "weka> hello")
+	}
+}
+
+func TestRenderWrappedMessageDoesNotIndentContinuationLines(t *testing.T) {
+	lines := renderMessageWithAgentPrompt("agent", "abcdefghZ", 14, "weka")
+	if len(lines) != 2 {
+		t.Fatalf("len(lines) = %d, want 2", len(lines))
+	}
+	if got := stripANSI(lines[0]); got != "weka> abcdefgh" {
+		t.Fatalf("first line = %q, want %q", got, "weka> abcdefgh")
+	}
+	if got := stripANSI(lines[1]); got != "Z" {
+		t.Fatalf("continuation line = %q, want %q", got, "Z")
+	}
+}
+
+func TestStartupPromptSummaryShowsSystemPromptAndInstructions(t *testing.T) {
+	got := startupPromptSummary("prefer examples")
+	if !strings.Contains(got, "system prompt:\n") || !strings.Contains(got, "custom instructions:\nprefer examples") {
+		t.Fatalf("startupPromptSummary missing prompt details: %q", got)
+	}
+}
+
+func TestStartupPromptSummaryShowsNoInstructions(t *testing.T) {
+	got := startupPromptSummary("   ")
+	if !strings.Contains(got, "custom instructions:\nnone") {
+		t.Fatalf("startupPromptSummary blank instructions = %q, want none", got)
+	}
+}
+
+func TestChatPromptIncludesCustomInstructions(t *testing.T) {
+	s := &Session{Instructions: "prefer examples"}
+	got := s.chatPrompt()
+	if !strings.Contains(got, "Additional user instructions:\nprefer examples") {
+		t.Fatalf("chatPrompt missing custom instructions: %q", got)
+	}
+}
+
+func TestInstructionsStatus(t *testing.T) {
+	if got := instructionsStatus("   "); got != "none" {
+		t.Fatalf("instructionsStatus blank = %q, want none", got)
+	}
+	if got := instructionsStatus("be brief"); got != "set" {
+		t.Fatalf("instructionsStatus set = %q, want set", got)
 	}
 }
 
