@@ -10,7 +10,7 @@ AI-dur is a single binary with no external dependencies. Just copy it wherever y
 
 ## Install
 
-Grab Darwin arm64 or Linux amd64 binaries from the releases page or build from source:
+Grab the matching macOS or Linux release archive for your CPU architecture (`amd64` or `arm64`) from the releases page, or build from source:
 
 ```sh
 go build -o dur ./cmd/dur
@@ -22,17 +22,27 @@ Then put `dur` somewhere on your `PATH`.
 
 ## Configuration
 
-Aidur uses the OpenCode Zen Responses API. Set your API key:
+Aidur uses the OpenCode Zen Responses API. Save your API key to config:
+
+```sh
+dur auth
+```
+
+Or set it with an environment variable:
 
 ```sh
 export OPENCODE_ZEN_API_KEY="..."
 ```
+
+`OPENCODE_ZEN_API_KEY` takes precedence over the config file.
 
 Persistent config is stored at:
 
 ```text
 ~/.config/aidur/config.json
 ```
+
+`dur` writes the config directory as `0700` and the config file as `0600`.
 
 Override the config path with:
 
@@ -67,6 +77,12 @@ Use a model for this invocation only:
 dur --model gpt-5.4-mini explain this error
 ```
 
+Save your API key to config:
+
+```sh
+dur auth
+```
+
 List available models:
 
 ```sh
@@ -97,6 +113,9 @@ Inside chat:
 
 ```text
 /help                              show help
+/instructions                      show custom instructions
+/instructions <text>               replace custom instructions
+/instructions clear                remove custom instructions
 /model <id>                        set persistent model
 /models                            list available models
 /status                            show configuration

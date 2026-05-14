@@ -1,9 +1,45 @@
 package provider
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/adamshand/aidur/internal/config"
 )
+
+func TestPromptWithInstructions(t *testing.T) {
+	if got := PromptWithInstructions("base", "   "); got != "base" {
+		t.Fatalf("blank instructions changed prompt: %q", got)
+	}
+	got := PromptWithInstructions("base", "prefer examples")
+	want := "base\n\nAdditional user instructions:\nprefer examples"
+	if got != want {
+		t.Fatalf("PromptWithInstructions = %q, want %q", got, want)
+	}
+}
+
+func TestNewUsesConfigAPIKeyWhenEnvMissing(t *testing.T) {
+	t.Setenv("OPENCODE_ZEN_API_KEY", "")
+	t.Setenv("AIDUR_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+	if err := config.Save(config.Config{OpenCodeZenAPIKey: "config-key"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := New().APIKey; got != "config-key" {
+		t.Fatalf("New().APIKey = %q, want config-key", got)
+	}
+}
+
+func TestNewPrefersEnvAPIKey(t *testing.T) {
+	t.Setenv("OPENCODE_ZEN_API_KEY", "env-key")
+	t.Setenv("AIDUR_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+	if err := config.Save(config.Config{OpenCodeZenAPIKey: "config-key"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := New().APIKey; got != "env-key" {
+		t.Fatalf("New().APIKey = %q, want env-key", got)
+	}
+}
 
 func TestReasoningOffDisablesReasoningSpec(t *testing.T) {
 	if Reasoning("off") != nil {

@@ -13,6 +13,7 @@ import (
 	"github.com/adamshand/aidur/internal/config"
 	"github.com/adamshand/aidur/internal/provider"
 	toolrunner "github.com/adamshand/aidur/internal/tools"
+	"golang.org/x/term"
 )
 
 var Version = "dev"
@@ -86,6 +87,13 @@ func run(argv []string) int {
 		fmt.Println(Version)
 		return 0
 	}
+	if len(args) > 0 && args[0] == "auth" {
+		if len(args) != 1 {
+			fmt.Fprintln(os.Stderr, "dur: auth does not take arguments")
+			return 2
+		}
+		return auth()
+	}
 	if modelsFlag {
 		if len(args) > 0 {
 			fmt.Fprintln(os.Stderr, "dur: --models does not take a question")
@@ -124,7 +132,8 @@ func oneShot(question string, debug bool, useTools bool, toolMaxCalls int, model
 	if useTools {
 		return oneShotWithTools(question, debug, model, thinking, toolMaxCalls)
 	}
-	req := provider.Request{Model: model, Instructions: provider.SystemPrompt, Input: question, Reasoning: provider.Reasoning(thinking)}
+	instructions := provider.PromptWithInstructions(provider.SystemPrompt, cfg.Instructions)
+	req := provider.Request{Model: model, Instructions: instructions, Input: question, Reasoning: provider.Reasoning(thinking)}
 	if debug {
 		b, _ := json.MarshalIndent(req, "", "  ")
 		fmt.Fprintln(os.Stderr, "--- dur request ---")
@@ -145,11 +154,12 @@ func oneShot(question string, debug bool, useTools bool, toolMaxCalls int, model
 }
 
 func oneShotWithTools(question string, debug bool, model string, thinking string, toolMaxCalls int) int {
+	cfg := config.Load()
 	client := provider.New()
 	cwd, _ := os.Getwd()
 	runner := toolrunner.NewRunner(cwd)
 	history := []map[string]any{{"role": "user", "content": question}}
-	instructions := provider.ChatPrompt + fmt.Sprintf("\nYou have a strict budget of at most %d tool calls. Prioritize the highest-signal read-only diagnostics before spending tool calls. When the budget is exhausted, stop requesting tools and provide the best final report from available evidence.", toolMaxCalls)
+	instructions := provider.PromptWithInstructions(provider.ChatPrompt, cfg.Instructions) + fmt.Sprintf("\nYou have a strict budget of at most %d tool calls. Prioritize the highest-signal read-only diagnostics before spending tool calls. When the budget is exhausted, stop requesting tools and provide the best final report from available evidence.", toolMaxCalls)
 	toolCalls := 0
 	for round := 0; round < 12; round++ {
 		req := provider.Request{Model: model, Instructions: instructions, Input: history, Reasoning: provider.Reasoning(thinking), Tools: []provider.ToolSchema{provider.ToolDefinition()}}
@@ -209,6 +219,38 @@ func oneShotWithTools(question string, debug bool, model string, thinking string
 	return 0
 }
 
+func auth() int {
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "dur: auth requires a terminal")
+		return 1
+	}
+	defer tty.Close()
+
+	fmt.Fprint(tty, "OpenCode Zen API key: ")
+	key, err := term.ReadPassword(int(tty.Fd()))
+	fmt.Fprintln(tty)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "dur:", err)
+		return 1
+	}
+
+	apiKey := strings.TrimSpace(string(key))
+	if apiKey == "" {
+		fmt.Fprintln(os.Stderr, "dur: API key cannot be empty")
+		return 1
+	}
+
+	cfg := config.Load()
+	cfg.OpenCodeZenAPIKey = apiKey
+	if err := config.Save(cfg); err != nil {
+		fmt.Fprintln(os.Stderr, "dur:", err)
+		return 1
+	}
+	fmt.Println("dur: API key saved to " + config.Path())
+	return 0
+}
+
 func printModels(currentModel string) int {
 	models, _ := provider.New().Models(context.Background())
 	for _, model := range models {
@@ -263,6 +305,7 @@ func usage() {
   dur [--debug] [--model ID] <question>
                               Ask a one-shot question
   dur --model ID               Start chat with a model override
+  dur auth                     Save OpenCode Zen API key to config
   dur --models                 List available models
   dur --tools on [--tool-max-calls N] <question>
                               Ask a one-shot question with read-only tools
