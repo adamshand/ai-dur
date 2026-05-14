@@ -85,6 +85,15 @@ func TestSystemctlValidators(t *testing.T) {
 	if got := RunReadOnly(t.TempDir(), "systemctl", []string{"restart", "nginx"}); !strings.Contains(got, "systemctl subcommand not allowed: restart") {
 		t.Fatal(got)
 	}
+	args, err := validateSystemctl([]string{"list-units", "--failed", "--no-pager"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(args, " ")
+	want := "list-units --failed --no-pager"
+	if got != want {
+		t.Fatalf("args = %q, want %q", got, want)
+	}
 }
 
 func TestDockerValidators(t *testing.T) {
