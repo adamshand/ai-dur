@@ -28,11 +28,12 @@ var Allowed = map[string]bool{
 var TrustedDirs = []string{"/bin", "/usr/bin", "/usr/local/bin", "/sbin", "/usr/sbin", "/opt/homebrew/bin", "/opt/homebrew/sbin"}
 
 type Record struct {
-	ID      int
-	Trace   string
-	Result  string
-	Denied  bool
-	Elapsed time.Duration
+	ID       int
+	Trace    string
+	Result   string
+	ExitCode int
+	Denied   bool
+	Elapsed  time.Duration
 }
 
 type Runner struct {
@@ -48,7 +49,7 @@ func (r *Runner) Run(cmd string, args []string) Record {
 	trace := strings.Join(append([]string{cmd}, args...), " ")
 	start := time.Now()
 	result := RunReadOnly(r.Cwd, cmd, args)
-	rec := Record{ID: r.NextID, Trace: trace, Result: result, Denied: strings.Contains(result, "\nstderr:\ndenied:"), Elapsed: time.Since(start)}
+	rec := Record{ID: r.NextID, Trace: trace, Result: result, ExitCode: ResultExitCode(result), Denied: strings.Contains(result, "\nstderr:\ndenied:"), Elapsed: time.Since(start)}
 	r.NextID++
 	r.Records = append(r.Records, rec)
 	return rec
@@ -67,6 +68,19 @@ func (r *Runner) Last() (Record, bool) {
 		return Record{}, false
 	}
 	return r.Records[len(r.Records)-1], true
+}
+
+func ResultExitCode(result string) int {
+	for _, line := range strings.Split(result, "\n") {
+		if strings.HasPrefix(line, "exit_code: ") {
+			code, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "exit_code: ")))
+			if err == nil {
+				return code
+			}
+			return 0
+		}
+	}
+	return 0
 }
 
 func RunReadOnly(cwd, cmd string, args []string) string {

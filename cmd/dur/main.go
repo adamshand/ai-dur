@@ -203,7 +203,7 @@ func oneShotWithTools(question string, debug bool, model string, thinking string
 				return 1
 			}
 			rec := runner.Run(args.Cmd, args.Args)
-			fmt.Fprintf(os.Stderr, "tool %d %s %s %s\n", rec.ID, toolStatus(rec), rec.Trace, rec.Elapsed.Round(10_000_000))
+			fmt.Fprintf(os.Stderr, "tool %d %s %s exit %d %s\n", rec.ID, toolStatus(rec), rec.Trace, rec.ExitCode, rec.Elapsed.Round(10_000_000))
 			history = append(history, map[string]any{"type": "function_call", "call_id": call.CallID, "name": call.Name, "arguments": call.Arguments})
 			history = append(history, map[string]any{"type": "function_call_output", "call_id": call.CallID, "output": rec.Result})
 			toolCalls++

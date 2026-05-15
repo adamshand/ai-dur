@@ -131,12 +131,28 @@ Inside chat:
 /tools                             list available read-only tools
 /tools verbose on|off              toggle expanded tool output
 /tools history                     list tool call history
-/tool N                            show tool call N
-/tool last                         show most recent tool call
+/tool N                            toggle tool call N output
+/tool last                         toggle most recent tool call output
 /cd <path>                         change tool working directory
 /debug on|off                      toggle debug request output
 /quit                              exit
 ! ls /etc                          run command so agent can see results
+```
+
+Useful chat keybindings:
+
+```text
+Up / Down                         browse input history
+Ctrl-P / Ctrl-N                    browse input history
+Ctrl-A / Ctrl-E                    move to start/end of line
+Ctrl-B / Ctrl-F                    move left/right
+Alt-B / Alt-F                      move word left/right
+Ctrl-W / Alt-D                     delete word backward/forward
+Ctrl-U / Ctrl-K                    delete to start/end of line
+Ctrl-Y                             paste last killed text
+Ctrl-O                             toggle most recent tool output
+Ctrl-C                             clear input, or cancel active response when input is empty
+Ctrl-D                             exit when input is empty
 ```
 
 ## Sudo

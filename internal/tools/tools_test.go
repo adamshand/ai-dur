@@ -7,6 +7,15 @@ import (
 	"testing"
 )
 
+func TestResultExitCode(t *testing.T) {
+	if got := ResultExitCode("command: pwd\nexit_code: 7\nstdout:\n\nstderr:\n"); got != 7 {
+		t.Fatalf("ResultExitCode() = %d, want 7", got)
+	}
+	if got := ResultExitCode("not a tool result"); got != 0 {
+		t.Fatalf("ResultExitCode() = %d, want 0", got)
+	}
+}
+
 func TestDeniedCommands(t *testing.T) {
 	for _, tc := range []struct {
 		name string

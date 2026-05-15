@@ -12,9 +12,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/adamshand/aidur/internal/config"
@@ -43,49 +43,10 @@ const (
 	disableTerminalInputModesSequence = "\033[?2004l\033[<u\033[>4;0m\033[?25h"
 )
 
-var deltaSpinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-
-type Session struct {
-	Provider     provider.Client
-	Cfg          config.Config
-	Model        string
-	ModelSource  string
-	Thinking     string
-	Instructions string
-	Debug        bool
-	Runner       *tools.Runner
-	History      []map[string]any
-	UI           *TerminalUI
-	turnMu       sync.Mutex
-	turnID       uint64
-	turnCancel   context.CancelFunc
-}
-
-type transcriptItem struct {
-	Role string
-	Text string
-}
-
-type TerminalUI struct {
-	mu             sync.Mutex
-	items          []transcriptItem
-	input          string
-	cursor         int
-	oldState       *term.State
-	pasteMode      bool
-	pasteBuf       strings.Builder
-	liveLines      int
-	cursorRow      int
-	running        bool
-	statusFunc     func() string
-	onSubmit       func(string)
-	onCancel       func()
-	agentPrompt    string
-	deltaActive    bool
-	deltaRole      string
-	deltaSpinID    uint64
-	deltaSpinFrame int
-}
+var (
+	deltaSpinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+	terminalSize       = term.GetSize
+)
 
 func Run(debug bool, modelOverride string, stdinContext string) int {
 	cfg := config.Load()
@@ -183,13 +144,14 @@ func (ui *TerminalUI) Run() error {
 	defer disableTerminalInputModes()
 	defer ui.finish()
 	ui.mu.Lock()
-	_, h, sizeErr := term.GetSize(int(os.Stdout.Fd()))
+	_, h, sizeErr := terminalSize(int(os.Stdout.Fd()))
 	if sizeErr != nil || h <= 0 {
 		h = 24
 	}
 	transcriptRows := 0
-	for _, item := range ui.items {
-		transcriptRows += ui.printMessageLocked(item.Role, item.Text)
+	for i, item := range ui.items {
+		ui.items[i].PrintedRows = ui.printTranscriptItemLocked(item, false)
+		transcriptRows += ui.items[i].PrintedRows
 	}
 	ui.padToBottomLocked(h, transcriptRows)
 	ui.renderLiveLocked()
@@ -257,21 +219,9 @@ func (ui *TerminalUI) handleData(data string) {
 			data = data[6:]
 			continue
 		}
-		if data == "\x1b" {
-			ui.cancel()
-			return
-		}
-		if n, key, ok := navigationKeySequence(data); ok {
-			ui.handleNavigationKey(key)
-			data = data[n:]
-			continue
-		}
-		if n, ok := modifiedEnterSequenceLen(data); ok {
-			ui.insertText("\n")
-			data = data[n:]
-			continue
-		}
-		if n, ok := ui.handleTerminalKeySequence(data); ok {
+		n, event, ok := parseKeyEventPrefix(data)
+		if ok {
+			ui.handleKey(event)
 			data = data[n:]
 			continue
 		}
@@ -279,47 +229,92 @@ func (ui *TerminalUI) handleData(data string) {
 			data = dropEscape(data)
 			continue
 		}
-		r, size := utf8.DecodeRuneInString(data)
-		if r == utf8.RuneError && size == 0 {
+		_, size := utf8.DecodeRuneInString(data)
+		if size == 0 {
 			return
 		}
 		data = data[size:]
-		switch r {
-		case '\x01': // Ctrl-A beginning of prompt.
-			ui.handleControlRune('a')
-		case '\x03': // Ctrl-C clears input.
-			ui.handleControlRune('c')
-		case '\x04': // Ctrl-D exits.
-			ui.handleControlRune('d')
-		case '\x05': // Ctrl-E end of prompt.
-			ui.handleControlRune('e')
-		case '\x0b': // Ctrl-K kill to end of prompt.
-			ui.handleControlRune('k')
-		case '\x15': // Ctrl-U kill to beginning of prompt.
-			ui.handleControlRune('u')
-		case '\x1a': // Ctrl-Z suspends.
-			ui.handleControlRune('z')
-		case '\r':
-			ui.submit()
-		case '\n':
-			// In raw mode plain Enter is normally CR. Some terminals/configs send
-			// Shift+Enter as a literal LF (the same byte as Ctrl-J), so treat LF as
-			// the multiline input path.
-			ui.insertText("\n")
-		case '\x7f', '\b':
-			ui.backspace()
-		default:
-			if r >= 32 || r == '\t' {
-				ui.insertText(string(r))
-			}
+	}
+}
+
+func parseKeyEventPrefix(data string) (int, KeyEvent, bool) {
+	if data == "" {
+		return 0, KeyEvent{}, false
+	}
+	if data == "\x1b" {
+		return 1, KeyEvent{Key: KeyEscape}, true
+	}
+	if strings.HasPrefix(data, "\x1b\x7f") || strings.HasPrefix(data, "\x1b\b") {
+		return 2, KeyEvent{Key: KeyBackspace, Mods: KeyModifiers{Alt: true}}, true
+	}
+	if len(data) >= 2 && data[0] == '\x1b' && data[1] >= 32 && data[1] != '[' && data[1] != 'O' {
+		r, size := utf8.DecodeRuneInString(data[1:])
+		if size > 0 {
+			return 1 + size, KeyEvent{Key: KeyRune, Rune: r, Mods: KeyModifiers{Alt: true}}, true
 		}
 	}
+	if n, event, ok := csiNavigationKeyEvent(data); ok {
+		return n, event, true
+	}
+	if n, code, mod, ok := parseTerminalKeySequence(data); ok {
+		return n, terminalCodeKeyEvent(code, mod), true
+	}
+	if n, ok := modifiedEnterSequenceLen(data); ok {
+		return n, KeyEvent{Key: KeyEnter, Mods: KeyModifiers{Shift: true}}, true
+	}
+	r, size := utf8.DecodeRuneInString(data)
+	if r == utf8.RuneError && size == 0 {
+		return 0, KeyEvent{}, false
+	}
+	switch r {
+	case '\x01':
+		return size, controlKeyEvent('a'), true
+	case '\x02':
+		return size, controlKeyEvent('b'), true
+	case '\x03':
+		return size, controlKeyEvent('c'), true
+	case '\x04':
+		return size, controlKeyEvent('d'), true
+	case '\x05':
+		return size, controlKeyEvent('e'), true
+	case '\x06':
+		return size, controlKeyEvent('f'), true
+	case '\x0b':
+		return size, controlKeyEvent('k'), true
+	case '\x0e':
+		return size, controlKeyEvent('n'), true
+	case '\x0f':
+		return size, controlKeyEvent('o'), true
+	case '\x10':
+		return size, controlKeyEvent('p'), true
+	case '\x15':
+		return size, controlKeyEvent('u'), true
+	case '\x17':
+		return size, controlKeyEvent('w'), true
+	case '\x19':
+		return size, controlKeyEvent('y'), true
+	case '\x1a':
+		return size, controlKeyEvent('z'), true
+	case '\r':
+		return size, KeyEvent{Key: KeyEnter}, true
+	case '\n':
+		return size, KeyEvent{Key: KeyEnter, Mods: KeyModifiers{Shift: true}}, true
+	case '\t':
+		return size, KeyEvent{Key: KeyTab}, true
+	case '\x7f', '\b':
+		return size, KeyEvent{Key: KeyBackspace}, true
+	default:
+		if r >= 32 {
+			return size, KeyEvent{Key: KeyRune, Rune: r}, true
+		}
+	}
+	return size, KeyEvent{Key: KeyUnknown}, true
 }
 
 func normalizePaste(s string) string {
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "\n")
-	return s
+	return sanitizeDisplayText(s)
 }
 
 func modifiedEnterSequenceLen(s string) (int, bool) {
@@ -337,136 +332,245 @@ func modifiedEnterSequenceLen(s string) (int, bool) {
 	return 0, false
 }
 
-func navigationKeySequence(s string) (int, string, bool) {
+func controlKeyEvent(r rune) KeyEvent {
+	return KeyEvent{Key: KeyRune, Rune: r, Mods: KeyModifiers{Ctrl: true}}
+}
+
+func csiNavigationKeyEvent(s string) (int, KeyEvent, bool) {
 	if len(s) >= 3 && strings.HasPrefix(s, "\x1bO") {
 		switch s[2] {
+		case 'A':
+			return 3, KeyEvent{Key: KeyUp}, true
+		case 'B':
+			return 3, KeyEvent{Key: KeyDown}, true
 		case 'C':
-			return 3, "right", true
+			return 3, KeyEvent{Key: KeyRight}, true
 		case 'D':
-			return 3, "left", true
+			return 3, KeyEvent{Key: KeyLeft}, true
 		case 'H':
-			return 3, "home", true
+			return 3, KeyEvent{Key: KeyHome}, true
 		case 'F':
-			return 3, "end", true
+			return 3, KeyEvent{Key: KeyEnd}, true
 		}
 	}
 	if !strings.HasPrefix(s, "\x1b[") {
-		return 0, "", false
+		return 0, KeyEvent{}, false
 	}
 	for i := 2; i < len(s); i++ {
 		if s[i] < 0x40 || s[i] > 0x7e {
 			continue
 		}
+		body := s[2:i]
+		mods := csiModifiers(body)
 		switch s[i] {
+		case 'A':
+			return i + 1, KeyEvent{Key: KeyUp, Mods: mods}, true
+		case 'B':
+			return i + 1, KeyEvent{Key: KeyDown, Mods: mods}, true
 		case 'C':
-			return i + 1, "right", true
+			return i + 1, KeyEvent{Key: KeyRight, Mods: mods}, true
 		case 'D':
-			return i + 1, "left", true
+			return i + 1, KeyEvent{Key: KeyLeft, Mods: mods}, true
 		case 'H':
-			return i + 1, "home", true
+			return i + 1, KeyEvent{Key: KeyHome, Mods: mods}, true
 		case 'F':
-			return i + 1, "end", true
+			return i + 1, KeyEvent{Key: KeyEnd, Mods: mods}, true
 		case '~':
-			return tildeNavigationKey(s[2:i], i+1)
+			key := csiTildeKey(body)
+			if key != KeyUnknown {
+				return i + 1, KeyEvent{Key: key, Mods: mods}, true
+			}
 		}
-		return 0, "", false
+		return 0, KeyEvent{}, false
 	}
-	return 0, "", false
+	return 0, KeyEvent{}, false
 }
 
-func tildeNavigationKey(body string, n int) (int, string, bool) {
+func csiTildeKey(body string) Key {
 	if i := strings.IndexAny(body, ";:"); i >= 0 {
 		body = body[:i]
 	}
 	switch body {
 	case "1", "7":
-		return n, "home", true
+		return KeyHome
 	case "4", "8":
-		return n, "end", true
+		return KeyEnd
 	case "3":
-		return n, "delete", true
-	}
-	return 0, "", false
-}
-
-func (ui *TerminalUI) handleNavigationKey(key string) {
-	switch key {
-	case "left":
-		ui.moveLeft()
-	case "right":
-		ui.moveRight()
-	case "home":
-		ui.moveStart()
-	case "end":
-		ui.moveEnd()
-	case "delete":
-		ui.deleteForward()
+		return KeyDelete
+	default:
+		return KeyUnknown
 	}
 }
 
-func (ui *TerminalUI) handleKittyFunctionalKey(code rune) bool {
+func csiModifiers(body string) KeyModifiers {
+	parts := strings.FieldsFunc(body, func(r rune) bool { return r == ';' || r == ':' })
+	if len(parts) < 2 {
+		return KeyModifiers{}
+	}
+	mod, ok := parseKeyInt(parts[1])
+	if !ok {
+		return KeyModifiers{}
+	}
+	return keyModifiers(mod)
+}
+
+func terminalCodeKeyEvent(code rune, mod int) KeyEvent {
+	mods := keyModifiers(mod)
+	if mods.Ctrl && code >= 'A' && code <= 'Z' {
+		code += 'a' - 'A'
+	}
 	switch code {
+	case 13:
+		return KeyEvent{Key: KeyEnter, Mods: mods}
+	case 27:
+		return KeyEvent{Key: KeyEscape, Mods: mods}
+	case 57416:
+		return KeyEvent{Key: KeyUp, Mods: mods}
 	case 57417:
-		ui.moveLeft()
+		return KeyEvent{Key: KeyLeft, Mods: mods}
 	case 57418:
-		ui.moveRight()
+		return KeyEvent{Key: KeyRight, Mods: mods}
+	case 57419:
+		return KeyEvent{Key: KeyDown, Mods: mods}
 	case 57423:
-		ui.moveStart()
+		return KeyEvent{Key: KeyHome, Mods: mods}
 	case 57424:
-		ui.moveEnd()
+		return KeyEvent{Key: KeyEnd, Mods: mods}
 	case 57426:
-		ui.deleteForward()
+		return KeyEvent{Key: KeyDelete, Mods: mods}
+	default:
+		if code >= 32 {
+			return KeyEvent{Key: KeyRune, Rune: code, Mods: mods}
+		}
+		return KeyEvent{Key: KeyUnknown, Mods: mods}
+	}
+}
+
+func keyModifiers(mod int) KeyModifiers {
+	return KeyModifiers{
+		Shift: keyHasShift(mod),
+		Alt:   mod > 1 && (mod-1)&2 != 0,
+		Ctrl:  keyHasCtrl(mod),
+		Super: keyHasSuper(mod),
+	}
+}
+
+func (ui *TerminalUI) handleKey(event KeyEvent) {
+	switch event.Key {
+	case KeyEscape:
+		ui.cancel()
+	case KeyUp:
+		ui.historyPrevious()
+	case KeyDown:
+		ui.historyNext()
+	case KeyEnter:
+		if event.HasModifier() {
+			ui.insertText("\n")
+		} else {
+			ui.submit()
+		}
+	case KeyLeft:
+		if event.Mods.Alt || event.Mods.Ctrl {
+			ui.moveWordLeft()
+		} else {
+			ui.moveLeft()
+		}
+	case KeyRight:
+		if event.Mods.Alt || event.Mods.Ctrl {
+			ui.moveWordRight()
+		} else {
+			ui.moveRight()
+		}
+	case KeyHome:
+		ui.moveStart()
+	case KeyEnd:
+		ui.moveEnd()
+	case KeyBackspace:
+		if event.Mods.Alt {
+			ui.deleteWordBackward()
+		} else {
+			ui.backspace()
+		}
+	case KeyDelete:
+		if event.Mods.Alt {
+			ui.deleteWordForward()
+		} else {
+			ui.deleteForward()
+		}
+	case KeyRune:
+		if event.Mods.Ctrl {
+			ui.handleControlRune(event.Rune)
+		} else if event.Mods.Alt {
+			ui.handleAltRune(event.Rune)
+		} else if !ui.handleMacOptionRune(event.Rune) {
+			ui.insertText(string(event.Rune))
+		}
+	}
+}
+
+func (ui *TerminalUI) handleAltRune(r rune) {
+	switch r {
+	case 'b', 'B':
+		ui.moveWordLeft()
+	case 'f', 'F':
+		ui.moveWordRight()
+	case 'd', 'D':
+		ui.deleteWordForward()
+	}
+}
+
+func (ui *TerminalUI) handleMacOptionRune(r rune) bool {
+	// Some macOS terminals insert Option-key symbols unless Option is configured
+	// as Meta. Treat the common readline Option chords like their Alt equivalents.
+	switch r {
+	case '∫':
+		ui.moveWordLeft()
+	case 'ƒ':
+		ui.moveWordRight()
+	case '∂':
+		ui.deleteWordForward()
 	default:
 		return false
 	}
 	return true
 }
 
-func (ui *TerminalUI) handleTerminalKeySequence(s string) (int, bool) {
-	n, code, mod, ok := parseTerminalKeySequence(s)
-	if !ok {
-		return 0, false
-	}
-	if ui.handleKittyFunctionalKey(code) {
-		return n, true
-	}
-	if code == 27 {
-		ui.cancel()
-		return n, true
-	}
-	if code == 13 {
-		if keyHasCtrl(mod) || keyHasSuper(mod) {
-			ui.submit()
-		} else if keyHasShift(mod) {
-			ui.insertText("\n")
-		} else {
-			ui.submit()
-		}
-		return n, true
-	}
-	if !keyHasCtrl(mod) {
-		return n, true
-	}
-	if code >= 'A' && code <= 'Z' {
-		code += 'a' - 'A'
-	}
-	return n, ui.handleControlRune(code)
-}
-
 func (ui *TerminalUI) handleControlRune(r rune) bool {
 	switch r {
 	case 'a':
 		ui.moveStart()
+	case 'b':
+		ui.moveLeft()
 	case 'c':
-		ui.clearInput()
+		if ui.input == "" {
+			ui.cancel()
+		} else {
+			ui.clearInput()
+		}
 	case 'd':
-		ui.running = false
+		if ui.input == "" {
+			ui.running = false
+		} else {
+			ui.deleteForward()
+		}
 	case 'e':
 		ui.moveEnd()
+	case 'f':
+		ui.moveRight()
 	case 'k':
 		ui.killEnd()
+	case 'n':
+		ui.historyNext()
+	case 'o':
+		ui.ToggleLastTool()
+	case 'p':
+		ui.historyPrevious()
 	case 'u':
 		ui.killStart()
+	case 'w':
+		ui.deleteWordBackward()
+	case 'y':
+		ui.yank()
 	case 'z':
 		ui.suspend()
 	default:
@@ -572,12 +676,14 @@ func (ui *TerminalUI) insertText(text string) {
 	ui.mu.Lock()
 	defer ui.mu.Unlock()
 	ui.clampCursorLocked()
+	ui.markInputEditedLocked()
 	ui.input = ui.input[:ui.cursor] + text + ui.input[ui.cursor:]
 	ui.cursor += len(text)
 }
 
 func (ui *TerminalUI) clearInput() {
 	ui.mu.Lock()
+	ui.markInputEditedLocked()
 	ui.input = ""
 	ui.cursor = 0
 	ui.mu.Unlock()
@@ -617,11 +723,27 @@ func (ui *TerminalUI) moveRight() {
 	ui.cursor += size
 }
 
+func (ui *TerminalUI) moveWordLeft() {
+	ui.mu.Lock()
+	defer ui.mu.Unlock()
+	ui.clampCursorLocked()
+	ui.cursor = previousWordStart(ui.input, ui.cursor)
+}
+
+func (ui *TerminalUI) moveWordRight() {
+	ui.mu.Lock()
+	defer ui.mu.Unlock()
+	ui.clampCursorLocked()
+	ui.cursor = nextWordEnd(ui.input, ui.cursor)
+}
+
 func (ui *TerminalUI) killStart() {
 	ui.mu.Lock()
 	defer ui.mu.Unlock()
 	ui.clampCursorLocked()
 	start := lineStart(ui.input, ui.cursor)
+	ui.saveKillLocked(ui.input[start:ui.cursor])
+	ui.markInputEditedLocked()
 	ui.input = ui.input[:start] + ui.input[ui.cursor:]
 	ui.cursor = start
 }
@@ -631,6 +753,8 @@ func (ui *TerminalUI) killEnd() {
 	defer ui.mu.Unlock()
 	ui.clampCursorLocked()
 	end := lineEnd(ui.input, ui.cursor)
+	ui.saveKillLocked(ui.input[ui.cursor:end])
+	ui.markInputEditedLocked()
 	ui.input = ui.input[:ui.cursor] + ui.input[end:]
 }
 
@@ -642,6 +766,7 @@ func (ui *TerminalUI) backspace() {
 		return
 	}
 	_, size := utf8.DecodeLastRuneInString(ui.input[:ui.cursor])
+	ui.markInputEditedLocked()
 	ui.input = ui.input[:ui.cursor-size] + ui.input[ui.cursor:]
 	ui.cursor -= size
 }
@@ -654,14 +779,108 @@ func (ui *TerminalUI) deleteForward() {
 		return
 	}
 	_, size := utf8.DecodeRuneInString(ui.input[ui.cursor:])
+	ui.markInputEditedLocked()
 	ui.input = ui.input[:ui.cursor] + ui.input[ui.cursor+size:]
+}
+
+func (ui *TerminalUI) deleteWordBackward() {
+	ui.mu.Lock()
+	defer ui.mu.Unlock()
+	ui.clampCursorLocked()
+	start := previousWordStart(ui.input, ui.cursor)
+	ui.saveKillLocked(ui.input[start:ui.cursor])
+	ui.markInputEditedLocked()
+	ui.input = ui.input[:start] + ui.input[ui.cursor:]
+	ui.cursor = start
+}
+
+func (ui *TerminalUI) deleteWordForward() {
+	ui.mu.Lock()
+	defer ui.mu.Unlock()
+	ui.clampCursorLocked()
+	end := nextWordEnd(ui.input, ui.cursor)
+	ui.saveKillLocked(ui.input[ui.cursor:end])
+	ui.markInputEditedLocked()
+	ui.input = ui.input[:ui.cursor] + ui.input[end:]
+}
+
+func (ui *TerminalUI) yank() {
+	ui.mu.Lock()
+	defer ui.mu.Unlock()
+	if ui.killRing == "" {
+		return
+	}
+	ui.clampCursorLocked()
+	ui.markInputEditedLocked()
+	ui.input = ui.input[:ui.cursor] + ui.killRing + ui.input[ui.cursor:]
+	ui.cursor += len(ui.killRing)
+}
+
+func (ui *TerminalUI) saveKillLocked(text string) {
+	if text != "" {
+		ui.killRing = text
+	}
+}
+
+func (ui *TerminalUI) rememberInputLocked(text string) {
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	if len(ui.inputHistory) > 0 && ui.inputHistory[len(ui.inputHistory)-1] == text {
+		return
+	}
+	ui.inputHistory = append(ui.inputHistory, text)
+}
+
+func (ui *TerminalUI) markInputEditedLocked() {
+	if ui.historyIndex != len(ui.inputHistory) {
+		ui.historyIndex = len(ui.inputHistory)
+		ui.historyDraft = ""
+	}
+}
+
+func (ui *TerminalUI) historyPrevious() {
+	ui.mu.Lock()
+	defer ui.mu.Unlock()
+	if len(ui.inputHistory) == 0 {
+		return
+	}
+	if ui.historyIndex < 0 || ui.historyIndex > len(ui.inputHistory) {
+		ui.historyIndex = len(ui.inputHistory)
+	}
+	if ui.historyIndex == len(ui.inputHistory) {
+		ui.historyDraft = ui.input
+	}
+	if ui.historyIndex > 0 {
+		ui.historyIndex--
+	}
+	ui.input = ui.inputHistory[ui.historyIndex]
+	ui.cursor = len(ui.input)
+}
+
+func (ui *TerminalUI) historyNext() {
+	ui.mu.Lock()
+	defer ui.mu.Unlock()
+	if len(ui.inputHistory) == 0 || ui.historyIndex < 0 || ui.historyIndex >= len(ui.inputHistory) {
+		return
+	}
+	ui.historyIndex++
+	if ui.historyIndex == len(ui.inputHistory) {
+		ui.input = ui.historyDraft
+	} else {
+		ui.input = ui.inputHistory[ui.historyIndex]
+	}
+	ui.cursor = len(ui.input)
 }
 
 func (ui *TerminalUI) submit() {
 	ui.mu.Lock()
 	text := ui.input
+	ui.rememberInputLocked(text)
 	ui.input = ""
 	ui.cursor = 0
+	ui.historyIndex = len(ui.inputHistory)
+	ui.historyDraft = ""
 	ui.mu.Unlock()
 	if ui.onSubmit != nil {
 		ui.onSubmit(text)
@@ -677,11 +896,102 @@ func (ui *TerminalUI) cancel() {
 func (ui *TerminalUI) Append(role, text string) {
 	ui.mu.Lock()
 	defer ui.mu.Unlock()
+	ui.appendItemLocked(transcriptItem{Role: role, Text: text})
+}
+
+func (ui *TerminalUI) AppendTool(rec tools.Record, expanded bool) {
+	ui.mu.Lock()
+	defer ui.mu.Unlock()
+	recCopy := rec
+	ui.appendItemLocked(transcriptItem{Role: "tool", Tool: &recCopy, ToolExpanded: expanded})
+}
+
+func (ui *TerminalUI) appendItemLocked(item transcriptItem) {
 	ui.clearLiveLocked()
 	ui.commitDeltaLocked()
-	ui.items = append(ui.items, transcriptItem{Role: role, Text: text})
-	ui.printMessageBlockLocked(role, text, len(ui.items) > 1)
+	idx := len(ui.items)
+	ui.items = append(ui.items, item)
+	ui.items[idx].PrintedRows = ui.printTranscriptItemLocked(ui.items[idx], idx > 0)
 	ui.renderLiveLocked()
+}
+
+func (ui *TerminalUI) ToggleLastTool() bool {
+	ui.mu.Lock()
+	defer ui.mu.Unlock()
+	for i := len(ui.items) - 1; i >= 0; i-- {
+		if ui.items[i].Tool != nil {
+			return ui.toggleToolLocked(i)
+		}
+	}
+	return false
+}
+
+func (ui *TerminalUI) ToggleTool(id int) bool {
+	ui.mu.Lock()
+	defer ui.mu.Unlock()
+	for i := range ui.items {
+		if ui.items[i].Tool != nil && ui.items[i].Tool.ID == id {
+			return ui.toggleToolLocked(i)
+		}
+	}
+	return false
+}
+
+func (ui *TerminalUI) toggleToolLocked(index int) bool {
+	if !ui.canRedrawTranscriptFromLocked(index) {
+		ui.appendExpandedToolFallbackLocked(index)
+		return true
+	}
+	ui.items[index].ToolExpanded = !ui.items[index].ToolExpanded
+	ui.redrawTranscriptFromLocked(index)
+	return true
+}
+
+func (ui *TerminalUI) appendExpandedToolFallbackLocked(index int) {
+	if index < 0 || index >= len(ui.items) || ui.items[index].Tool == nil {
+		return
+	}
+	recCopy := *ui.items[index].Tool
+	ui.appendItemLocked(transcriptItem{Role: "tool", Tool: &recCopy, ToolExpanded: true})
+}
+
+func (ui *TerminalUI) canRedrawTranscriptFromLocked(index int) bool {
+	rows := ui.printedRowsFromLocked(index)
+	if rows <= 0 {
+		return false
+	}
+	_, height, err := terminalSize(int(os.Stdout.Fd()))
+	return err != nil || height <= 0 || rows+ui.liveLines < height
+}
+
+func (ui *TerminalUI) redrawTranscriptFromLocked(index int) {
+	if index < 0 || index >= len(ui.items) {
+		return
+	}
+	rows := ui.printedRowsFromLocked(index)
+	if rows <= 0 {
+		return
+	}
+	ui.clearLiveLocked()
+	fmt.Print(beginSynchronizedOutput)
+	fmt.Printf("\033[%dA", rows)
+	fmt.Print("\r\033[J")
+	for i := index; i < len(ui.items); i++ {
+		ui.items[i].PrintedRows = ui.printTranscriptItemLocked(ui.items[i], i > 0)
+	}
+	fmt.Print(endSynchronizedOutput)
+	ui.renderLiveLocked()
+}
+
+func (ui *TerminalUI) printedRowsFromLocked(index int) int {
+	if index < 0 || index >= len(ui.items) {
+		return 0
+	}
+	rows := 0
+	for i := index; i < len(ui.items); i++ {
+		rows += ui.items[i].PrintedRows
+	}
+	return rows
 }
 
 func (ui *TerminalUI) StartDelta(role string) {
@@ -776,11 +1086,10 @@ func (ui *TerminalUI) commitDeltaLocked() {
 		return
 	}
 	idx := len(ui.items) - 1
-	item := ui.items[idx]
 	ui.deltaSpinID++
 	ui.deltaActive = false
 	ui.deltaRole = ""
-	ui.printMessageBlockLocked(item.Role, item.Text, idx > 0)
+	ui.items[idx].PrintedRows = ui.printTranscriptItemLocked(ui.items[idx], idx > 0)
 }
 
 func (ui *TerminalUI) renderLive() {
@@ -791,19 +1100,13 @@ func (ui *TerminalUI) renderLive() {
 }
 
 func (ui *TerminalUI) clearLiveLocked() {
-	if ui.liveLines == 0 {
-		return
-	}
-	if ui.cursorRow > 0 {
-		fmt.Printf("\033[%dA", ui.cursorRow)
-	}
-	fmt.Print("\r\033[J")
-	ui.liveLines = 0
-	ui.cursorRow = 0
+	ui.renderer.Clear()
+	ui.liveLines = ui.renderer.liveLines
+	ui.cursorRow = ui.renderer.cursorRow
 }
 
 func (ui *TerminalUI) padToBottomLocked(height int, transcriptRows int) {
-	w, _, err := term.GetSize(int(os.Stdout.Fd()))
+	w, _, err := terminalSize(int(os.Stdout.Fd()))
 	if err != nil || w <= 0 {
 		w = 80
 	}
@@ -858,7 +1161,7 @@ func trimLiveLines(lines []string, maxRows int) []string {
 }
 
 func (ui *TerminalUI) renderLiveLocked() {
-	w, h, err := term.GetSize(int(os.Stdout.Fd()))
+	w, h, err := terminalSize(int(os.Stdout.Fd()))
 	if err != nil || w <= 0 {
 		w = 80
 	}
@@ -888,60 +1191,46 @@ func (ui *TerminalUI) renderLiveLocked() {
 		activeLines = trimLiveLines(activeLines, liveContentRows(h, len(ui.items) > 0))
 	}
 
-	row := 0
-	writeLine := func(line string) {
-		if row > 0 {
-			fmt.Print("\r\n")
-		}
-		fmt.Print("\033[2K" + line)
-		row++
-	}
+	frame := liveFrame{}
 	if len(ui.items) > 0 {
-		writeLine("")
+		frame.Lines = append(frame.Lines, "")
 	}
 	if ui.deltaActive {
-		for _, line := range activeLines {
-			writeLine(line)
-		}
 		if len(activeLines) == 0 {
-			writeLine("")
+			frame.Lines = append(frame.Lines, "")
 			cursorLine = 0
 			cursorCol = 0
 		} else {
+			frame.Lines = append(frame.Lines, activeLines...)
 			cursorLine = len(activeLines) - 1
 			cursorCol = visibleWidthNoANSI(activeLines[cursorLine])
 		}
 	} else {
-		for _, line := range inputLines {
-			writeLine(line)
-		}
+		frame.Lines = append(frame.Lines, inputLines...)
 	}
 	for range footerTopPaddingRows {
-		writeLine("")
+		frame.Lines = append(frame.Lines, "")
 	}
-	writeLine(renderStatusBar(status, w))
-
-	ui.liveLines = row
-	ui.cursorRow = cursorLine
+	frame.Lines = append(frame.Lines, renderStatusBar(status, w))
+	frame.CursorRow = cursorLine
 	if len(ui.items) > 0 {
-		ui.cursorRow++
+		frame.CursorRow++
 	}
 	if cursorCol >= w {
 		cursorCol = w - 1
 	}
-	up := ui.liveLines - 1 - ui.cursorRow
-	if up > 0 {
-		fmt.Printf("\033[%dA", up)
-	}
-	fmt.Printf("\r\033[%dC\033[?25h", cursorCol)
+	frame.CursorCol = cursorCol
+	ui.renderer.Render(frame)
+	ui.liveLines = ui.renderer.liveLines
+	ui.cursorRow = ui.renderer.cursorRow
 }
 
 func (ui *TerminalUI) printMessageLocked(role, text string) int {
-	return ui.printMessageBlockLocked(role, text, false)
+	return ui.printTranscriptItemLocked(transcriptItem{Role: role, Text: text}, false)
 }
 
-func (ui *TerminalUI) printMessageBlockLocked(role, text string, leadingBlank bool) int {
-	w, _, err := term.GetSize(int(os.Stdout.Fd()))
+func (ui *TerminalUI) printTranscriptItemLocked(item transcriptItem, leadingBlank bool) int {
+	w, _, err := terminalSize(int(os.Stdout.Fd()))
 	if err != nil || w <= 0 {
 		w = 80
 	}
@@ -950,7 +1239,7 @@ func (ui *TerminalUI) printMessageBlockLocked(role, text string, leadingBlank bo
 		fmt.Print("\r\n")
 		rows++
 	}
-	lines := renderMessageWithAgentPrompt(role, text, w, ui.displayAgentPromptLocked())
+	lines := ui.renderTranscriptItemLocked(item, w)
 	for i, line := range lines {
 		if i > 0 {
 			fmt.Print("\r\n")
@@ -960,6 +1249,17 @@ func (ui *TerminalUI) printMessageBlockLocked(role, text string, leadingBlank bo
 	}
 	fmt.Print("\r\n")
 	return rows
+}
+
+func (ui *TerminalUI) renderTranscriptItemLocked(item transcriptItem, width int) []string {
+	if item.Tool != nil {
+		text := plainToolLine(*item.Tool, item.ToolExpanded)
+		if item.ToolExpanded {
+			text += "\n" + renderToolResultPlain(item.Tool.Result)
+		}
+		return renderMessageWithAgentPrompt("tool", text, width, ui.displayAgentPromptLocked())
+	}
+	return renderMessageWithAgentPrompt(item.Role, item.Text, width, ui.displayAgentPromptLocked())
 }
 
 func (ui *TerminalUI) displayAgentPromptLocked() string {
@@ -1047,6 +1347,8 @@ func renderPrefixed(color, prefix, text string, width int) []string {
 type renderPos struct{ start, end, colBase int }
 
 func renderPrefixedWithPositions(color, prefix, text string, width int) ([]string, []renderPos) {
+	prefix = sanitizeDisplayText(prefix)
+	text = sanitizeDisplayText(text)
 	if width < 10 {
 		width = 10
 	}
@@ -1127,6 +1429,44 @@ func (ui *TerminalUI) clampCursorLocked() {
 	for ui.cursor > 0 && ui.cursor < len(ui.input) && !utf8.RuneStart(ui.input[ui.cursor]) {
 		ui.cursor--
 	}
+}
+
+func previousWordStart(s string, cursor int) int {
+	cursor = clamp(cursor, 0, len(s))
+	for cursor > 0 {
+		r, size := utf8.DecodeLastRuneInString(s[:cursor])
+		if !unicode.IsSpace(r) {
+			break
+		}
+		cursor -= size
+	}
+	for cursor > 0 {
+		r, size := utf8.DecodeLastRuneInString(s[:cursor])
+		if unicode.IsSpace(r) {
+			break
+		}
+		cursor -= size
+	}
+	return cursor
+}
+
+func nextWordEnd(s string, cursor int) int {
+	cursor = clamp(cursor, 0, len(s))
+	for cursor < len(s) {
+		r, size := utf8.DecodeRuneInString(s[cursor:])
+		if !unicode.IsSpace(r) {
+			break
+		}
+		cursor += size
+	}
+	for cursor < len(s) {
+		r, size := utf8.DecodeRuneInString(s[cursor:])
+		if unicode.IsSpace(r) {
+			break
+		}
+		cursor += size
+	}
+	return cursor
 }
 
 func lineStart(s string, cursor int) int {
@@ -1609,10 +1949,7 @@ func (s *Session) turnWithContext(ctx context.Context) error {
 			}
 			_ = json.Unmarshal([]byte(call.Arguments), &args)
 			rec := s.Runner.Run(args.Cmd, args.Args)
-			s.UI.Append("tool", plainToolLine(rec, false))
-			if s.Runner.Verbose {
-				s.UI.Append("tool", plainToolLine(rec, true)+"\n"+renderToolResultPlain(rec.Result))
-			}
+			s.UI.AppendTool(rec, s.Runner.Verbose)
 			s.History = append(s.History, map[string]any{"type": "function_call", "call_id": call.CallID, "name": call.Name, "arguments": call.Arguments})
 			s.History = append(s.History, map[string]any{"type": "function_call_output", "call_id": call.CallID, "output": rec.Result})
 			toolCalls++
@@ -1718,18 +2055,27 @@ func (s *Session) showTool(fields []string) {
 		s.UI.Append("dur", "Usage: /tool N")
 		return
 	}
-	var rec tools.Record
-	var ok bool
 	if fields[1] == "last" {
-		rec, ok = s.Runner.Last()
-	} else {
-		id, err := strconv.Atoi(fields[1])
-		if err != nil {
-			s.UI.Append("dur", "Usage: /tool N")
+		if s.UI.ToggleLastTool() {
 			return
 		}
-		rec, ok = s.Runner.Get(id)
+		rec, ok := s.Runner.Last()
+		if !ok {
+			s.UI.Append("dur", "no recent tool call available to toggle")
+			return
+		}
+		s.UI.Append("tool", plainToolLine(rec, true)+"\n"+renderToolResultPlain(rec.Result))
+		return
 	}
+	id, err := strconv.Atoi(fields[1])
+	if err != nil {
+		s.UI.Append("dur", "Usage: /tool N")
+		return
+	}
+	if s.UI.ToggleTool(id) {
+		return
+	}
+	rec, ok := s.Runner.Get(id)
 	if !ok {
 		s.UI.Append("dur", "no such tool call")
 		return
@@ -1746,7 +2092,7 @@ func plainToolLine(rec tools.Record, expanded bool) string {
 	if rec.Denied {
 		status = "✕"
 	}
-	return fmt.Sprintf("[tool] %d %s %s %s %s", rec.ID, status, glyph, rec.Trace, rec.Elapsed.Round(10_000_000))
+	return fmt.Sprintf("[tool] %d %s %s %s exit %d %s", rec.ID, status, glyph, rec.Trace, rec.ExitCode, rec.Elapsed.Round(10_000_000))
 }
 
 func renderToolResultPlain(result string) string {
@@ -1911,11 +2257,14 @@ const helpText = `/cd <path>                         change command working dire
 /quit                              exit chat
 /status                            show configuration
 /thinking off|low|medium|high      set reasoning effort
-/tool N                            show tool call N with output
-/tool last                         show most recent tool call with output
+/tool N                            toggle tool call N output
+/tool last                         toggle most recent tool call output
 /tools                             list available tools (read-only)
 /tools history                     list tool call history
 /tools verbose on|off              toggle expanded tool output
+
+Keyboard shortcuts:
+  Ctrl-O                           toggle most recent visible tool output
 
 Additional documentation and examples are available at:
   https://github.com/adamshand/ai-dur`

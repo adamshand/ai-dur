@@ -3,6 +3,8 @@ package chat
 import (
 	"strings"
 	"testing"
+
+	"github.com/adamshand/aidur/internal/tools"
 )
 
 func TestRenderInputEmptyCursorAfterPrompt(t *testing.T) {
@@ -60,6 +62,47 @@ func TestRenderWrappedMessageDoesNotIndentContinuationLines(t *testing.T) {
 	}
 }
 
+func TestRenderTranscriptItemRendersCollapsedAndExpandedTool(t *testing.T) {
+	ui := &TerminalUI{}
+	rec := tools.Record{ID: 7, Trace: "pwd", Result: "exit_code: 0\nstdout:\n/tmp\nstderr:\n", Elapsed: 0}
+
+	collapsed := strings.Join(ui.renderTranscriptItemLocked(transcriptItem{Role: "tool", Tool: &rec}, 80), "\n")
+	if got := stripANSI(collapsed); !strings.Contains(got, "[tool] 7 ✓ ▸ pwd exit 0") || strings.Contains(got, "stdout") {
+		t.Fatalf("collapsed tool render = %q", got)
+	}
+
+	expanded := strings.Join(ui.renderTranscriptItemLocked(transcriptItem{Role: "tool", Tool: &rec, ToolExpanded: true}, 80), "\n")
+	got := stripANSI(expanded)
+	if !strings.Contains(got, "[tool] 7 ✓ ▾ pwd exit 0") || !strings.Contains(got, "stdout") || !strings.Contains(got, "/tmp") {
+		t.Fatalf("expanded tool render = %q", got)
+	}
+}
+
+func TestToggleToolTooFarBackAppendsExpandedFallback(t *testing.T) {
+	oldTerminalSize := terminalSize
+	terminalSize = func(int) (int, int, error) { return 80, 3, nil }
+	defer func() { terminalSize = oldTerminalSize }()
+
+	rec := tools.Record{ID: 7, Trace: "pwd", Result: "exit_code: 0\nstdout:\n/tmp\nstderr:\n"}
+	ui := &TerminalUI{
+		items:     []transcriptItem{{Role: "tool", Tool: &rec, PrintedRows: 1}},
+		liveLines: 3,
+	}
+
+	if !ui.ToggleLastTool() {
+		t.Fatalf("ToggleLastTool returned false")
+	}
+	if len(ui.items) != 2 {
+		t.Fatalf("len(items) = %d, want fallback appended", len(ui.items))
+	}
+	if ui.items[0].ToolExpanded {
+		t.Fatalf("original tool should remain collapsed when fallback is appended")
+	}
+	if ui.items[1].Tool == nil || !ui.items[1].ToolExpanded {
+		t.Fatalf("fallback item = %#v, want expanded tool", ui.items[1])
+	}
+}
+
 func TestStartupPromptSummaryShowsSystemPromptAndInstructions(t *testing.T) {
 	got := startupPromptSummary("prefer examples")
 	if !strings.Contains(got, "system prompt:\n") || !strings.Contains(got, "custom instructions:\nprefer examples") {
@@ -100,25 +143,27 @@ func TestTerminalInputModesDoNotQueryOrReportKeyRelease(t *testing.T) {
 	}
 }
 
-func TestNavigationKeySequence(t *testing.T) {
+func TestParseKeyEventNavigationSequences(t *testing.T) {
 	cases := []struct {
 		seq string
-		key string
+		key Key
 	}{
-		{"\x1b[D", "left"},
-		{"\x1b[C", "right"},
-		{"\x1b[1;1D", "left"},
-		{"\x1b[1;5C", "right"},
-		{"\x1bOD", "left"},
-		{"\x1bOC", "right"},
-		{"\x1b[H", "home"},
-		{"\x1b[F", "end"},
-		{"\x1b[3~", "delete"},
+		{"\x1b[A", KeyUp},
+		{"\x1b[B", KeyDown},
+		{"\x1b[D", KeyLeft},
+		{"\x1b[C", KeyRight},
+		{"\x1b[1;1D", KeyLeft},
+		{"\x1b[1;5C", KeyRight},
+		{"\x1bOD", KeyLeft},
+		{"\x1bOC", KeyRight},
+		{"\x1b[H", KeyHome},
+		{"\x1b[F", KeyEnd},
+		{"\x1b[3~", KeyDelete},
 	}
 	for _, tc := range cases {
-		n, key, ok := navigationKeySequence(tc.seq + "rest")
-		if !ok || n != len(tc.seq) || key != tc.key {
-			t.Fatalf("navigationKeySequence(%q) = (%d, %q, %v), want (%d, %q, true)", tc.seq, n, key, ok, len(tc.seq), tc.key)
+		n, event, ok := parseKeyEventPrefix(tc.seq + "rest")
+		if !ok || n != len(tc.seq) || event.Key != tc.key {
+			t.Fatalf("parseKeyEventPrefix(%q) = (%d, %#v, %v), want (%d, %s, true)", tc.seq, n, event, ok, len(tc.seq), tc.key)
 		}
 	}
 }
@@ -143,6 +188,110 @@ func TestHandleDataSupportsKittyFunctionalArrowKeys(t *testing.T) {
 	}
 }
 
+func TestHandleDataConsumesUpDownArrows(t *testing.T) {
+	ui := &TerminalUI{}
+	ui.handleData("abc")
+	ui.handleData("\x1b[A")
+	ui.handleData("\x1b[B")
+	ui.handleData("\x1b[57416u")
+	ui.handleData("\x1b[57419u")
+	if ui.input != "abc" {
+		t.Fatalf("input after up/down arrows = %q, want abc", ui.input)
+	}
+}
+
+func TestHandleDataSupportsReadlineWordKeys(t *testing.T) {
+	ui := &TerminalUI{}
+	ui.handleData("one two")
+	ui.handleData("\x1bb")
+	ui.handleData("X")
+	if ui.input != "one Xtwo" {
+		t.Fatalf("input after alt-b = %q, want one Xtwo", ui.input)
+	}
+	ui.handleData("\x17")
+	if ui.input != "one two" {
+		t.Fatalf("input after ctrl-w = %q, want one two", ui.input)
+	}
+	ui.handleData("\x1bd")
+	if ui.input != "one " {
+		t.Fatalf("input after alt-d = %q, want one-space", ui.input)
+	}
+	ui.handleData("\x19")
+	if ui.input != "one two" {
+		t.Fatalf("input after ctrl-y = %q, want one two", ui.input)
+	}
+}
+
+func TestHandleDataSupportsMacOptionWordKeys(t *testing.T) {
+	ui := &TerminalUI{}
+	ui.handleData("one two")
+	ui.handleData("∫")
+	ui.handleData("X")
+	if ui.input != "one Xtwo" {
+		t.Fatalf("input after option-b fallback = %q, want one Xtwo", ui.input)
+	}
+	ui.handleData("∂")
+	if ui.input != "one X" {
+		t.Fatalf("input after option-d fallback = %q, want one X", ui.input)
+	}
+}
+
+func TestHandleDataSupportsInputHistory(t *testing.T) {
+	ui := &TerminalUI{}
+	ui.handleData("first\r")
+	ui.handleData("second\r")
+	ui.handleData("draft")
+	ui.handleData("\x1b[A")
+	if ui.input != "second" {
+		t.Fatalf("up history = %q, want second", ui.input)
+	}
+	ui.handleData("\x1b[A")
+	if ui.input != "first" {
+		t.Fatalf("second up history = %q, want first", ui.input)
+	}
+	ui.handleData("\x1b[B")
+	if ui.input != "second" {
+		t.Fatalf("down history = %q, want second", ui.input)
+	}
+	ui.handleData("\x1b[B")
+	if ui.input != "draft" {
+		t.Fatalf("down restores draft = %q, want draft", ui.input)
+	}
+}
+
+func TestHandleDataSupportsEmacsHistoryKeys(t *testing.T) {
+	ui := &TerminalUI{}
+	ui.handleData("first\r")
+	ui.handleData("second\r")
+	ui.handleData("\x10")
+	if ui.input != "second" {
+		t.Fatalf("ctrl-p history = %q, want second", ui.input)
+	}
+	ui.handleData("\x10")
+	if ui.input != "first" {
+		t.Fatalf("second ctrl-p history = %q, want first", ui.input)
+	}
+	ui.handleData("\x0e")
+	if ui.input != "second" {
+		t.Fatalf("ctrl-n history = %q, want second", ui.input)
+	}
+}
+
+func TestCtrlDQuitsOnlyWhenInputEmpty(t *testing.T) {
+	ui := &TerminalUI{running: true}
+	ui.handleData("ab")
+	ui.handleData("\x02")
+	ui.handleData("\x04")
+	if !ui.running || ui.input != "a" {
+		t.Fatalf("ctrl-d with input running=%v input=%q, want still running and input a", ui.running, ui.input)
+	}
+	ui.handleData("\x15")
+	ui.handleData("\x04")
+	if ui.running {
+		t.Fatalf("ctrl-d on empty should quit")
+	}
+}
+
 func TestModifiedEnterSequenceLen(t *testing.T) {
 	cases := []string{
 		"\x1b[13;2u",
@@ -160,6 +309,13 @@ func TestModifiedEnterSequenceLen(t *testing.T) {
 	}
 	if _, ok := modifiedEnterSequenceLen("\x1b[13;1u"); ok {
 		t.Fatalf("plain CSI-u enter matched as modified enter")
+	}
+}
+
+func TestParseKeyEventLowercasesCtrlLetters(t *testing.T) {
+	_, event, ok := parseKeyEventPrefix("\x1b[65;5u")
+	if !ok || event.Key != KeyRune || event.Rune != 'a' || !event.Mods.Ctrl {
+		t.Fatalf("parseKeyEventPrefix ctrl-A = %#v, %v; want ctrl rune a", event, ok)
 	}
 }
 
@@ -236,6 +392,23 @@ func TestShortHostRemovesDomain(t *testing.T) {
 	}
 	if got := shortHost(""); got != "host" {
 		t.Fatalf("shortHost empty = %q, want host", got)
+	}
+}
+
+func TestSanitizeDisplayTextStripsTerminalControls(t *testing.T) {
+	input := "ok\x1b[31mred\x1b[0m\x1b]0;title\a\nnext\x07"
+	got := sanitizeDisplayText(input)
+	want := "okred\nnext"
+	if got != want {
+		t.Fatalf("sanitizeDisplayText = %q, want %q", got, want)
+	}
+}
+
+func TestRenderMessageSanitizesUntrustedText(t *testing.T) {
+	lines := renderMessageWithAgentPrompt("agent", "hi\x1b[2J", 80, "host")
+	got := stripANSI(strings.Join(lines, "\n"))
+	if strings.Contains(got, "\x1b") || got != "host> hi" {
+		t.Fatalf("rendered sanitized message = %q, want host> hi", got)
 	}
 }
 
