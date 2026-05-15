@@ -1,6 +1,7 @@
 APP := dur
 PKG := ./cmd/dur
 DIST_DIR := dist
+RELEASE_NOTES := $(DIST_DIR)/release-notes.md
 STAMP := $(shell date -u +%Y%m%d-%H%M)
 VERSION ?= dev-$(STAMP)
 RELEASE_VERSION ?= $(STAMP)
@@ -8,7 +9,7 @@ LDFLAGS := -s -w -X main.Version=$(VERSION)
 
 PLATFORMS := darwin/amd64 darwin/arm64 linux/amd64 linux/arm64
 
-.PHONY: all test build dist clean release release-check release-tag
+.PHONY: all test build dist clean release release-check release-notes release-tag
 
 all: test build
 
@@ -43,12 +44,37 @@ release-check:
 	@! git ls-remote --exit-code --tags origin "refs/tags/$(VERSION)" >/dev/null 2>&1 || (echo "tag $(VERSION) already exists on origin" && exit 1)
 	@! gh release view "$(VERSION)" >/dev/null 2>&1 || (echo "GitHub release $(VERSION) already exists" && exit 1)
 
+release-notes:
+	@mkdir -p $(DIST_DIR)
+	@git fetch --quiet --tags origin
+	@last_release="$$(gh release list --limit 1 --json tagName --jq '.[0].tagName // ""')"; \
+	if [ -n "$$last_release" ]; then \
+		range="$$last_release..HEAD"; \
+		scope="Changes since $$last_release"; \
+	else \
+		range="HEAD"; \
+		scope="Changes"; \
+	fi; \
+	{ \
+		echo "dur $(VERSION)"; \
+		echo; \
+		echo "$$scope:"; \
+		echo; \
+		commits="$$(git log --pretty=format:'- %s (%h)' $$range)"; \
+		if [ -n "$$commits" ]; then \
+			printf '%s\n' "$$commits"; \
+		else \
+			echo "- No commits since $$last_release."; \
+		fi; \
+	} > $(RELEASE_NOTES)
+
 release: VERSION := $(RELEASE_VERSION)
 release: release-check
 	$(MAKE) dist VERSION=$(VERSION)
+	$(MAKE) release-notes VERSION=$(VERSION)
 	git tag -a $(VERSION) -m "$(VERSION)"
 	git push origin $(VERSION)
-	gh release create $(VERSION) $(DIST_DIR)/*.tar.gz $(DIST_DIR)/checksums.txt --title "$(VERSION)" --notes "dur $(VERSION)"
+	gh release create $(VERSION) $(DIST_DIR)/*.tar.gz $(DIST_DIR)/checksums.txt --title "$(VERSION)" --notes-file "$(RELEASE_NOTES)"
 
 clean:
 	rm -rf $(DIST_DIR) $(APP)
